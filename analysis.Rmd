@@ -27,14 +27,15 @@ library(tidyverse) # data manipulation and visualization
 library(mgcv) # flexible nonlinear regression models
 library(furrr) # parallel processing
 library(gganimate) # animated gifs
+library(ggridges)
 ```
 
 Define a study area to constrain all computaitons.
 ```{r}
-bbox <- extent(c(-125, -100, 30, 50))
+bbox <- extent(c(-125, -104, 33, 50))
 ```
 
-Import the snow observation data.^[What's up with this warning message? long_name=CRS definition
+Import the snow observation data from https://nsidc.org/data/nsidc-0719.^[What's up with this warning message? long_name=CRS definition
 spatial_ref=GEOGCS["NAD83",DATUM["North_American_Datum_1983",SPHEROID["GRS 1980",6378137,298.257222101,AUTHORITY["EPSG","7019"]],AUTHORITY["EPSG","6269"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.01745329251994328,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4269"]]
 GeoTransform=-125.0208 0.04166662697178698 0 49.9375 0 -0.04166662697178698]
 
@@ -44,10 +45,11 @@ plan(multisession) # setup parallel processing
 preprocess <- function(x, var) {
   brick(x, varname = var) %>%
     crop(bbox) %>%
-    sum()
+    sum() %>%
+    aggregate(fact = 2, na.rm = TRUE)
 }
 
-swe_obs <- list.files(pattern = 'SWE_Depth', full.names = TRUE) %>%
+swe_obs <- list.files('data/', pattern = 'SWE_Depth', full.names = TRUE) %>%
   future_map(preprocess, var = 'SWE') %>%
   brick() %>%
   setNames(1982:2017)
@@ -58,6 +60,15 @@ depth_obs <- list.files(pattern = 'SWE_Depth', full.names = TRUE) %>%
   setNames(1982:2017)
 ```
 
+Import elevation and resample.
+```{r}
+elev <- raster('~/gdrive/Data/SRTM_1km.tif') %>%
+  crop(bbox) %>%
+  resample(depth_obs)
+```
+
+Turn the rasters into data frames and join.
+
 ```{r}
 swe_dat <- swe_obs %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
@@ -67,10 +78,61 @@ depth_dat <- depth_obs %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
   rename(water_year = layer, DEPTH = value)
 
-snow_dat <- left_join(swe_dat, depth_dat, by = c('x', 'y', 'water_year')) %>%
+elev_dat <- elev %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
+  rename(elev = SRTM_1km)
+
+snow_dat <- swe_dat %>%
+  left_join(depth_dat, by = c('x', 'y', 'water_year')) %>%
+  left_join(elev_dat, by = c('x', 'y')) %>%
   mutate(water_year = parse_number(water_year))
 ```
 
+
+
+```{r}
+snow_dat %>%
+  arrange(y) %>%
+ggplot(aes(water_year, SWE, group = interaction(x, y))) +
+  geom_line(aes(color = y), alpha = 0.1) +
+  theme_classic()
+```
+
+```{r}
+m1 <- bam(SWE ~ s(elev, bs = 'cr') + te(x,y, by = as.factor(water_year)), data = snow_dat, discrete = TRUE)
+plot(m1)
+summary(m1)
+```
+
+
+```{r}
+ggplot(swe_dat, aes(x = log(SWE + 1), y = as.factor(water_year), fill = ..x..)) +
+  geom_density_ridges_gradient()
+```
+
+Filter out the 0s
+```{r}
+swe_dat %>%
+  filter(SWE > 0) %>%
+ggplot(aes(x = SWE, y = as.factor(water_year), fill = ..x..)) +
+  geom_density_ridges_gradient() +
+  scale_x_log10() +
+  scale_fill_viridis_c() +
+  theme_minimal()
+```
+
+Animate
+
+```{r}
+swe_dat %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = SWE)) +
+  scale_fill_viridis_c() +
+  coord_quickmap()+
+  theme_void() +
+  ggtitle("Year: {closest_state}") +
+  transition_states(water_year)
+```
 First let's model the relationship between snow depth and snow water equivalent (i.e. snow density) in the observations.
 
 ```{r}
