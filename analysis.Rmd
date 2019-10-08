@@ -178,16 +178,26 @@ swe_dat %>%
 
 
 
+
+## Paleo
+```{r}
+brick('data/trace.01-36.22000BP.cam2.SNOWHLND.22000BP_decavg_400BCE.nc') %>%
+  rotate() %>%
+  crop(bbox, snap = 'out') %>% plot 
+
+brick('data/trace.01-36.22000BP.clm2.SNOWDP.22000BP_decavg_400BCE.nc', varname = 'SNOWDP') %>%
+  rotate() %>%
+  crop(bbox, snap = 'out') %>% plot 
+```
+
+
+## Reanalysis
 ```{r}
 ncdf_file <- 'adaptor.mars.internal-1566933160.7965047-18657-23-b3ae7b43-15db-4890-bc5b-4d3413fe4ddd.nc'
 ref <- brick(ncdf_file, var = 'sd') %>% 
   .[[1]]%>%
   rotate %>%
   crop(bbox)
-
-elev <- raster('~/gdrive/Data/SRTM_1km.tif') %>%
-  crop(bbox) %>%
-  resample(ref)
 
 snowfall <- brick(ncdf_file, var = 'sf') %>% 
   rotate %>%
