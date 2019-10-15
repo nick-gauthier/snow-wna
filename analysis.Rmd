@@ -261,13 +261,6 @@ ref <- brick(ncdf_file, var = 'sd') %>%
   rotate %>%
   crop(bbox)
 
-snowfall <- brick(ncdf_file, var = 'sf') %>% 
-  rotate %>%
-  crop(bbox) %>%
-  mask(elev) %>%
-  as.data.frame(xy = TRUE, long = TRUE) %>%
-  rename(time = Z, sf = value)
-
 snowdepth <- brick(ncdf_file, var = 'sd') %>% 
   rotate %>%
   crop(bbox) %>%
