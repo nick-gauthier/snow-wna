@@ -54,7 +54,7 @@ swe_obs <- list.files('data/', pattern = 'SWE_Depth', full.names = TRUE) %>%
   brick() %>%
   setNames(1982:2017)
 
-depth_obs <- list.files(pattern = 'SWE_Depth', full.names = TRUE) %>%
+depth_obs <- list.files('data/', pattern = 'SWE_Depth', full.names = TRUE) %>%
   future_map(preprocess, var = 'DEPTH') %>%
   brick() %>%
   setNames(1982:2017)
@@ -64,7 +64,7 @@ Import elevation and resample.
 ```{r}
 elev <- raster('~/gdrive/Data/SRTM_1km.tif') %>%
   crop(bbox) %>%
-  resample(depth_obs)
+  resample(swe_obs)
 ```
 
 Turn the rasters into data frames and join.
@@ -72,11 +72,13 @@ Turn the rasters into data frames and join.
 ```{r}
 swe_dat <- swe_obs %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
-  rename(water_year = layer, SWE = value)
+  rename(water_year = layer, SWE = value) %>%
+  mutate(x = round(x, 8), y = round(y, 8))
 
 depth_dat <- depth_obs %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
-  rename(water_year = layer, DEPTH = value)
+  rename(water_year = layer, DEPTH = value) %>%
+  mutate(x = round(x, 8), y = round(y, 8))
 
 elev_dat <- elev %>%
   as.data.frame(xy = TRUE, na.rm = TRUE) %>%
@@ -84,31 +86,33 @@ elev_dat <- elev %>%
 
 snow_dat <- swe_dat %>%
   left_join(depth_dat, by = c('x', 'y', 'water_year')) %>%
-  left_join(elev_dat, by = c('x', 'y')) %>%
+#  left_join(elev_dat, by = c('x', 'y')) %>%
   mutate(water_year = parse_number(water_year))
+
+
+ggplot(snow_dat, aes(x,y)) +
+  geom_raster(aes(fill = DEPTH)) +
+  facet_wrap(~water_year)
+
 ```
 
 
 
-```{r}
-snow_dat %>%
-  arrange(y) %>%
-ggplot(aes(water_year, SWE, group = interaction(x, y))) +
-  geom_line(aes(color = y), alpha = 0.1) +
-  theme_classic()
-```
+
 
 ```{r}
-m1 <- bam(SWE ~ s(elev, bs = 'cr') + te(x,y, by = as.factor(water_year)), data = snow_dat, discrete = TRUE)
-plot(m1)
+m1 <- bam(SWE ~ te(x, y, by = water_year, k = 15), data = filter(snow_dat, SWE > 0))
+plot(m1, scheme = 2)
 summary(m1)
+
+snow_dat %>%
+  filter(SWE > 0) %>%
+  filter(water_year == 1999) %>%
+  mutate(pred = predict(m1, ., type = 'response')) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = pred))
 ```
 
-
-```{r}
-ggplot(swe_dat, aes(x = log(SWE + 1), y = as.factor(water_year), fill = ..x..)) +
-  geom_density_ridges_gradient()
-```
 
 Filter out the 0s
 ```{r}
@@ -117,22 +121,139 @@ swe_dat %>%
 ggplot(aes(x = SWE, y = as.factor(water_year), fill = ..x..)) +
   geom_density_ridges_gradient() +
   scale_x_log10() +
-  scale_fill_viridis_c() +
+  scale_fill_distiller(palette = 'YlGnBu', direction= -1) +
   theme_minimal()
 ```
 
-Animate
+
+Now run a principal components analysis on the observed SPEI data. Much of the code that follows is adapted from the *wql* and *sinkr* packages.
 
 ```{r}
-swe_dat %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = SWE)) +
-  scale_fill_viridis_c() +
-  coord_quickmap()+
-  theme_void() +
-  ggtitle("Year: {closest_state}") +
-  transition_states(water_year)
+obs_pca <- swe_dat %>%
+  group_by(x, y) %>%
+  mutate(test = all(SWE== 0)) %>%
+  filter(test == FALSE) %>%
+  ungroup() %>%
+  select(-test)%>%
+  spread(water_year, SWE) %>%
+  select(-x, -y) %>%
+  t() %>%
+  prcomp(scale. = TRUE)
 ```
+
+```{r, echo = FALSE}
+library(broom)
+obs_eigs <- obs_pca %>%
+  tidy(matrix = 'pcs') %>%
+  mutate(eigenvalues = std.dev ^ 2)
+```
+
+
+
+```{r plot_variance_obs, fig.width = 5, fig.height = 4, echo = FALSE, fig.cap = 'Percent variance explained by the leading principal components of the observed SPEI record. PCs that are not well separated can be considered effective multiplets due to temporal autocorrelation, and should not be split in truncation.'}
+obs_eigs %>% 
+    filter(PC <= 12) %>%
+ggplot(aes(x = PC, y = percent * 100)) +
+  #geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
+  geom_point(size = 2) + 
+ # geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
+  labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
+  geom_vline(xintercept = 2.5, linetype = 2, color = 'red', alpha = .7) +
+  theme_bw() + 
+  guides(color = F) + 
+  scale_x_continuous(breaks = seq(0, 12, 2))
+```
+
+
+Define a function to calculate the empirical orthogonal functions and rotated empirical orthogonal functions, as well as their associated PC amplitude time series. Save all relevant information in a list for later use.
+
+
+
+Use this function to calculate the EOFs and REOFs for the observations and reconstructions, retaining the 6 leading components in each case for rotation.
+
+```{r calc_eofs}
+ eofs <- obs_pca %>% # calculate unrotated EOFs
+    tidy(matrix = 'variables') %>%
+    filter(PC <= 2) %>%
+    left_join(obs_eigs[1:2], by = 'PC') %>%
+    mutate(eof = value * std.dev,
+           PC = as.character(PC)) %>%
+    select(-std.dev, -value) 
+```
+
+```{r}
+  varim <- eofs %>% # varimax rotation
+    pivot_wider(names_from = PC, values_from = eof) %>%
+    column_to_rownames(var = 'column') %>%
+    as.matrix %>%
+    varimax
+  rot_mat <- varim$rotmat # rotater
+```
+
+```{r}  
+reofs <- unclass(varim$loadings) %>%
+    as_tibble(rownames = 'column') %>%
+    pivot_longer(-column, names_to = 'PC', values_to = 'reof') %>%
+  mutate(column = as.numeric(column)) %>%
+    right_join(eofs, by = c('column', 'PC'))
+  
+  eof_amps <- obs_pca$x %>%
+    .[,1:2] %>%
+    scale %>%
+    as_tibble(rownames = 'year', .name_repair = ~1:2) %>%
+    gather(PC, eof_amp, -year) %>%
+    mutate(year = as.numeric(str_sub(year, 2)),
+           PC = as.factor(paste0('PC', PC)))
+  
+  reof_amps <- obs_pca$x %>%
+    .[,1:2] %>%
+    scale %>%
+    `%*%`(rot_mat) %>%
+    as_tibble(rownames = 'year', .name_repair = ~1:n_modes) %>%
+    gather(PC, reof_amp, -year) %>%
+    mutate(year = as.numeric(str_sub(year, 2)),
+           PC = as.factor(paste0('PC', PC)))
+```
+
+rotation doesn't do much
+```{r}
+swe_dat%>%
+    group_by(x, y) %>%
+  mutate(test = all(SWE== 0)) %>%
+  filter(test == FALSE) %>%
+  ungroup() %>%
+  select(-test) %>%
+  spread(water_year, SWE) %>%
+  mutate(column = 1:n()) %>%
+  select(x, y, column) %>%
+  full_join(reofs) %>%
+  ggplot(aes(x, y, fill = reof)) +
+  geom_raster() +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu') +
+  theme_void()+
+  coord_quickmap()
+```
+
+```{r}
+swe_dat%>%
+    group_by(x, y) %>%
+  mutate(test = all(SWE== 0)) %>%
+  filter(test == FALSE) %>%
+  ungroup() %>%
+  select(-test) %>%
+  spread(water_year, SWE) %>%
+  mutate(column = 1:n()) %>%
+  select(x, y, column) %>%
+  full_join(reofs) %>%
+  ggplot(aes(x, y, fill = eof)) +
+  geom_raster() +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu') +
+  theme_void()+
+  coord_quickmap()
+```
+
 First let's model the relationship between snow depth and snow water equivalent (i.e. snow density) in the observations.
 
 ```{r}
@@ -142,52 +263,43 @@ snow_dat %>%
   geom_point()
 
 
-m1 <- bam(SWE ~ DEPTH, data = snow_dat)
 m2 <- bam(SWE ~ s(DEPTH), data = snow_dat, discrete = TRUE)
-m3 <- bam(SWE ~ s(DEPTH), data = snow_dat, discrete = TRUE, select = TRUE)
 
 plot(m2)
-plot(m3)
+summary(m2)
 
 test <- snow_dat %>%
-  mutate(m1 = SWE - predict(m1, .),
-         m2 = SWE - predict(m2, .),
-         m3 = SWE - predict(m3, .))
-
-test %>%
-  select(m1:m3) %>%
-  gather(model, error) %>%
-  group_by(model) %>%
-  summarise(rmse = sqrt(mean(error ^2)))
+  mutate(error = SWE - predict(m2, .))
 
 test %>%
   filter(water_year %in% 1995:1997) %>%
-    gather(model, error, m1:m3) %>%
   ggplot(aes(x, y)) +
   geom_raster(aes(fill = error)) +
   scale_fill_viridis_c() +
-  facet_grid(model~water_year) +
+  facet_wrap(~water_year) +
   coord_quickmap()+
   theme_void()
 ```
 Compare to climatological data for annual temperature range.
 
 ```{r}
-temp_range <- brick('CHELSA_bio10_07.tif') %>%
-  crop(bbox)
+temp_range <- brick('data/CHELSA_bio10_07.tif') %>%
+  crop(bbox)%>%
+  `/`(10)
 
-prec_djf <- (raster('CHELSA_prec_01_V1.2_land.tif') + 
-  raster('CHELSA_prec_02_V1.2_land.tif') + 
-  raster('CHELSA_prec_12_V1.2_land.tif')) %>%
+prec_djf <- (raster('data/CHELSA_prec_01_V1.2_land.tif') + 
+  raster('data/CHELSA_prec_02_V1.2_land.tif') + 
+  raster('data/CHELSA_prec_12_V1.2_land.tif')) %>%
   crop(bbox) %>%
   `/`(3)
+```
 
+```{r}
 plot(prec_djf)
 ```
 
-
 ```{r}
-plot(temp_range)
+plot(temp_range/10)
 ```
 
 
@@ -202,11 +314,6 @@ swe_dat %>%
   transition_states(water_year)
 ```
 
-```{r}
-swe_dat %>%
-  group_by(x, y) %>%
-  mutate(rho = cor(SWE, lag(SWE), use = 'complete.obs'))
-```
 
 ```{r, warning = FALSE}
 swe_dat %>%
@@ -221,25 +328,13 @@ swe_dat %>%
 
 
 ```{r}
-swe_dat %>%
+snow_dat %>%
   group_by(water_year) %>%
   summarise(SWE = sum(SWE, na.rm = TRUE)) %>%
   ggplot(aes(water_year, SWE)) +
   geom_col(aes(fill = SWE)) +
   scale_fill_viridis_c()
 ```
-
-```{r}
-swe_dat %>%
-  arrange(-SWE) 
-
-swe_dat %>%
-  pull(SWE) %>%
-  hist
-```
-
-
-
 
 ## Paleo
 ```{r}
@@ -255,11 +350,13 @@ brick('data/trace.01-36.22000BP.clm2.SNOWDP.22000BP_decavg_400BCE.nc', varname =
 
 ## Reanalysis
 ```{r}
-ncdf_file <- 'adaptor.mars.internal-1566933160.7965047-18657-23-b3ae7b43-15db-4890-bc5b-4d3413fe4ddd.nc'
+ncdf_file <- 'data/adaptor.mars.internal-1566933160.7965047-18657-23-b3ae7b43-15db-4890-bc5b-4d3413fe4ddd.nc'
 ref <- brick(ncdf_file, var = 'sd') %>% 
   .[[1]]%>%
   rotate %>%
   crop(bbox)
+
+elev <- resample(elev, ref)
 
 snowdepth <- brick(ncdf_file, var = 'sd') %>% 
   rotate %>%
@@ -283,17 +380,10 @@ precip <- brick(ncdf_file, var = 'tp') %>%
   rename(time = Z, tp = value)
 ```
 
-```{r}
-test <- swe_obs %>%
-  resample(ref, fun = sum)
-
-plot(test[[1]])
-```
 
 
 ```{r}
-dat <- snowfall %>%
-  left_join(snowdepth, by = c('x', 'y', 'time')) %>%
+dat <- snowdepth %>%
   left_join(temp, by = c('x', 'y', 'time')) %>%
   left_join(precip, by = c('x', 'y', 'time')) %>%
   as_tibble %>%
@@ -308,11 +398,6 @@ dat <- snowfall %>%
 
 ```{r}
 ggplot(dat, aes(t2m, sd)) +
-  geom_point(alpha = .5) +
-  facet_wrap(~season) +
-  theme_bw()
-
-ggplot(dat, aes(tp, sf)) +
   geom_point(alpha = .5) +
   facet_wrap(~season) +
   theme_bw()
@@ -358,11 +443,6 @@ dat2 %>%
 ```
 
 ```{r}
-dat2 %>%
-  group_by(x, y) %>%
-  summarise(rho = cor(sd, lag(sd), use = 'complete.obs')) %>%
-  qplot(rho, geom = "histogram", data = .)
-
 mod <- dat2 %>%
   mutate(start = if_else(water_year == min(water_year), TRUE, FALSE)) %>%
   filter(sd > 0) %>%
