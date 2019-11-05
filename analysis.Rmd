@@ -43,21 +43,31 @@ GeoTransform=-125.0208 0.04166662697178698 0 49.9375 0 -0.04166662697178698]
 plan(multisession) # setup parallel processing
 
 preprocess <- function(x, var) {
-  brick(x, varname = var) %>%
+  # determine the year of the file
+  year <- str_split(x, '_') %>%
+    .[[1]] %>%
+    .[4] %>%
+    parse_number()
+  
+  # find the index corresponding to april 1st
+  maps <- brick(x, varname = var)
+  times <- getZ(maps)
+  index <- which(times == as.Date(paste0(year, '-04-01')))
+    
+  # extract, crop, and resample
+  maps %>%
+    .[[index]] %>%
     crop(bbox) %>%
-    sum() %>%
     aggregate(fact = 2, na.rm = TRUE)
 }
 
-swe_obs <- list.files('data/', pattern = 'SWE_Depth', full.names = TRUE) %>%
+swe_obs <- list.files('data', pattern = 'SWE_Depth', full.names = TRUE) %>%
   future_map(preprocess, var = 'SWE') %>%
-  brick() %>%
-  setNames(1982:2017)
+  brick()
 
-depth_obs <- list.files('data/', pattern = 'SWE_Depth', full.names = TRUE) %>%
+depth_obs <- list.files('data', pattern = 'SWE_Depth', full.names = TRUE) %>%
   future_map(preprocess, var = 'DEPTH') %>%
-  brick() %>%
-  setNames(1982:2017)
+  brick()
 ```
 
 Import elevation and resample.
