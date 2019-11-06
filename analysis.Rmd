@@ -11,74 +11,76 @@ output:
   tufte::tufte_book:
     citation_package: natbib
     latex_engine: xelatex
-bibliography: skeleton.bib
 link-citations: yes
 ---
 
-Analysis of snowpack dynamics in western North America over the Common Era.
+Analysis of simulated and observed snow water equivalent (SWE) dynamics in western North America over the Common Era.
 
 ## Setup
 
 Import the packages required for this analysis.
 
-```{r}
+```{r setup, message = FALSE, warning = FALSE}
 library(raster) # processing raster data
 library(tidyverse) # data manipulation and visualization
 library(mgcv) # flexible nonlinear regression models
 library(furrr) # parallel processing
 library(gganimate) # animated gifs
-library(ggridges)
+library(ggridges) # ridge plots
+library(broom) # tidying model objects
 ```
+
+## Main Analysis
 
 Define a study area to constrain all computaitons.
 ```{r}
 bbox <- extent(c(-125, -104, 33, 50))
 ```
 
+### Observations
+
 Import the snow observation data from https://nsidc.org/data/nsidc-0719.^[What's up with this warning message? long_name=CRS definition
 spatial_ref=GEOGCS["NAD83",DATUM["North_American_Datum_1983",SPHEROID["GRS 1980",6378137,298.257222101,AUTHORITY["EPSG","7019"]],AUTHORITY["EPSG","6269"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.01745329251994328,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4269"]]
-GeoTransform=-125.0208 0.04166662697178698 0 49.9375 0 -0.04166662697178698]
+GeoTransform=-125.0208 0.04166662697178698 0 49.9375 0 -0.04166662697178698]. First define a function to extract the map for April 1st from each annual file, then run it on the SWE and snow depth data.
 
-```{r, message=FALSE,warning=FALSE}
+```{r}
+preprocess <- function(x, var, flip = FALSE, regrid = FALSE) {
+  maps <- brick(x, varname = var)
+
+  indices <- getZ(maps) %>% # find the index for April 1st
+    str_detect('-04-01') %>% 
+    which()
+  
+  subset(maps, indices) %>%
+    {if(flip) rotate(.) else .} %>%
+    crop(bbox) %>%
+    {if(regrid) aggregate(., fact = 2, na.rm = TRUE) else .} # resample to lower res to speed up analysis
+}
+```
+
+```{r message=FALSE,warning=FALSE}
 plan(multisession) # setup parallel processing
 
-preprocess <- function(x, var) {
-  # determine the year of the file
-  year <- str_split(x, '_') %>%
-    .[[1]] %>%
-    .[4] %>%
-    parse_number()
-  
-  # find the index corresponding to april 1st
-  maps <- brick(x, varname = var)
-  times <- getZ(maps)
-  index <- which(times == as.Date(paste0(year, '-04-01')))
-    
-  # extract, crop, and resample
-  maps %>%
-    .[[index]] %>%
-    crop(bbox) %>%
-    aggregate(fact = 2, na.rm = TRUE)
-}
-
+# import SWE data
 swe_obs <- list.files('data', pattern = 'SWE_Depth', full.names = TRUE) %>%
-  future_map(preprocess, var = 'SWE') %>%
+  future_map(preprocess, var = 'SWE', regrid = TRUE) %>%
   brick()
 
+# import depth data
 depth_obs <- list.files('data', pattern = 'SWE_Depth', full.names = TRUE) %>%
-  future_map(preprocess, var = 'DEPTH') %>%
+  future_map(preprocess, var = 'DEPTH', regrid = TRUE) %>%
   brick()
 ```
 
-Import elevation and resample.
+Import SRTM elevation and resample to the resolution of the observations. Also calculate the area of each grid cell.
 ```{r}
 elev <- raster('~/gdrive/Data/SRTM_1km.tif') %>%
   crop(bbox) %>%
-  resample(swe_obs)
+  resample(swe_obs) %>%
+  brick(., area(.))
 ```
 
-Turn the rasters into data frames and join.
-
+Turn all the rasters into data frames and join.
 ```{r}
 swe_dat <- swe_obs %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
@@ -94,54 +96,218 @@ depth_dat <- depth_obs %>%
 
 elev_dat <- elev %>%
   as.data.frame(xy = TRUE, na.rm = TRUE) %>%
-  rename(elev = SRTM_1km)
+  rename(elev = SRTM_1km, area = layer)
 
 snow_dat <- swe_dat %>%
   left_join(depth_dat, by = c('x', 'y', 'year')) %>%
   left_join(elev_dat, by = c('x', 'y'))
-
-
-ggplot(snow_dat, aes(x,y)) +
-  geom_raster(aes(fill = SWE)) +
-  facet_wrap(~year) +
-  coord_quickmap() +
-  scale_fill_viridis_c() +
-  theme_void()
 ```
 
+Look at how SWE has varied over time and space.
 
-Looks good down here, but these are in absolute numbers. maybe rescale to look at relative change?
-```{r}
-m1 <- bam(SWE ~ te(x, y, by = year, k = 20), data = snow_dat)
-summary(m1)
-
-snow_dat %>%
-  filter(year == 1999) %>%
-  mutate(pred = predict(m1, ., type = 'response')) %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = pred)) +
-  scale_fill_distiller(palette = 'RdBu', direction = 1, limits = c(-1000, 1000))
-```
-
-
-Filter out the 0s
-```{r}
+```{r animation, echo = FALSE, cache = TRUE}
 swe_dat %>%
-  filter(SWE > 0) %>%
-ggplot(aes(x = SWE, y = as.factor(year), fill = ..x..)) +
-  geom_density_ridges_gradient() +
-  scale_x_log10() +
-  scale_fill_distiller(palette = 'YlGnBu', direction= -1) +
-  theme_minimal()
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = SWE)) +
+  scale_fill_viridis_c() +
+  coord_quickmap()+
+  theme_void() +
+  ggtitle("Snow Water Equivalent", "April 1st, {closest_state}") +
+  transition_states(year)
 ```
 
+Some aggregate statistics. Is this the right way to aggregate?
+
+```{r}
+snow_agg <- snow_dat %>%
+  filter(SWE > 0) %>%
+  group_by(year) %>%
+  summarise(SWE = sum(SWE * area), # units in megaliters (?)
+            area = sum(area))
+```
+
+How has total SWE varied over the observational period?
+```{r, echo = FALSE}
+ggplot(snow_agg, aes(year, SWE)) +
+  #geom_vline(xintercept = 2015, color = 'red', linetype = 2) +
+  geom_col(aes(fill = SWE)) +
+  scale_fill_viridis_c(guide = FALSE) +
+  theme_minimal() +
+  ggtitle('Total SWE over western North America')
+```
+
+What about total area covered?
+```{r, echo = FALSE}
+ggplot(snow_agg, aes(year, area)) +
+  geom_col(aes(fill = area)) +
+  scale_fill_viridis_c(guide = FALSE) +
+  theme_minimal() +
+  ggtitle('Total snow area over western North America')
+```
+
+```{r, echo = FALSE}
+ggplot(snow_agg, aes(area, SWE)) +
+  geom_point(aes(color = year), size = 2.5) +
+  scale_color_viridis_c() +
+  geom_smooth(method = 'lm') +
+  theme_minimal() +
+  labs(x = 'Area (km2)', title = 'Relationship between total SWE and snow extent')
+```
+
+
+
+### Simulations
+
+```{r}
+cesm_h2osno <- preprocess('~/Downloads/b.e11.BLMTRC5CN.f19_g16.001.clm2.h1.H2OSNO.08500101-18491231.nc',
+                          var = 'H2OSNO',
+                          flip = TRUE)
+cesm_h2osno_ext <- preprocess('~/Downloads/b.e11.BLMTRC5CN.f19_g16.001.clm2.h1.H2OSNO.18500101-20051231.nc',
+                          var = 'H2OSNO',
+                          flip = TRUE)
+
+cesm_areas <- area(cesm_h2osno) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
+  rename(area = layer)
+```
+
+still need to account for snow fraction of grid cell? and land fraction too?
+
+```{r}
+cesm_dat <- c(cesm_h2osno, cesm_h2osno_ext) %>%
+  brick() %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = str_sub(layer, 2) %>% parse_number() %>% round) %>%
+  rename(SWE = value) %>%
+  select(-layer) %>%
+  left_join(cesm_areas, by = c('x', 'y'))
+```
+
+```{r animation_cesm, echo = FALSE, cache = TRUE}
+cesm_dat %>%
+  filter(year < 1000) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = SWE)) +
+  scale_fill_viridis_c() +
+  coord_quickmap()+
+  theme_void() +
+  ggtitle("Simulated Snow Water Equivalent", "April 1st, {closest_state}") +
+  transition_states(year)
+```
+
+```{r}
+cesm_agg <- cesm_dat %>%
+  group_by(year) %>%
+  summarise(SWE = sum(SWE * area, na.rm = TRUE)) %>%
+  mutate(avg = zoo::rollmean(SWE, k = 100, na.pad = TRUE))
+```
+
+```{r, echo = FALSE}
+ggplot(cesm_agg, aes(year, SWE)) +
+  geom_line(alpha = .3) +
+  #geom_point(aes(color = SWE)) +
+  geom_line(aes(y = avg), size = 1.2) +
+  scale_color_viridis_c(guide = FALSE) +
+  geom_smooth(method = 'gam', formula = y ~ s(x, bs = "cs", k = 30)) +
+  theme_minimal() +
+  ggtitle('')
+```
+
+So there's a clear bias here. The mean of the observations is well higher than it should be. Looks like the simulation underpredicts snow -- likely because of all the small-scale topographic influences that CESM can't resolve.
+```{r, echo = FALSE, fig.width = 3.5, fig.height = 8}
+mod_avg <- snow_agg %>% 
+  summarise(SWE = mean(SWE)) %>%
+  pull(SWE)
+
+cesm_agg %>%
+  mutate(period = floor((year / 30)) * 30) %>%
+  ggplot(aes(SWE, period, group = period)) +
+  geom_density_ridges(fill = 'lightgrey') +
+  #ggridges::geom_density_ridges_gradient(stat = 'density', scale = 1.5)+
+  #scale_fill_viridis_c(guide = F) +
+  geom_vline(xintercept= c(mod_avg), linetype = 2) +
+  ggridges::theme_ridges(grid = FALSE, center_axis_labels = TRUE)
+```
+
+Let's compare the observations and simulation directly.
+
+What's the climatic mean April 1st SWE for the observations and simulations?
+```{r, echo = FALSE}
+snow_dat %>%
+  filter(year <= 2005) %>%
+  group_by(x, y) %>%
+  summarise(SWE = mean(SWE))%>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = SWE)) +
+  coord_quickmap() +
+  theme_void() +
+  scale_fill_viridis_c() +
+  ggtitle('Observed mean April 1st SWE, 1982-2005', 'CESM LME extension')
+```
+
+
+To what extent is this mistmatch due to bias or scale effects? Test by resampling the observations to the CESM LME grid.
+
+```{r, echo = FALSE}
+mean_swe_cesm_ext <- cesm_dat %>%
+  filter(year >= 1982) %>%
+  group_by(x, y) %>%
+  summarise(sim = mean(SWE))
+swe_obs_resamp <- swe_obs %>%
+  subset(1:24) %>% 
+  mean %>%
+  resample(cesm_h2osno_ext) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
+  rename(obs = layer)
+
+left_join(swe_obs_resamp, mean_swe_cesm_ext, by = c('x', 'y')) %>%
+  gather(type, SWE, 3:4) %>%
+ggplot(aes(x, y)) +
+  geom_raster(aes(fill = SWE)) +
+  coord_quickmap() +
+  theme_void() +
+  facet_wrap(~type) +
+  scale_fill_viridis_c() +
+  ggtitle('Observed vs Simulated mean April 1st SWE', '1982-2005')
+```
+
+This comparison suggests that CESM is underpredicting SWE because of the simplified topography. Check this by looking at the underlying topography boundary files for that simulation.
+```{r}
+surface_geop <- raster('data/consistent-topo-fv1.9x2.5_c130424.nc', 
+                       var = 'PHIS') %>%
+  rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  `/`(9.80665) %>%
+  as.data.frame(na.rm = TRUE, xy = TRUE) 
+
+landfrac <- raster('data/consistent-topo-fv1.9x2.5_c130424.nc', 
+                   var = 'LANDFRAC') %>%
+  rotate() %>%
+  crop(bbox, snap = 'out')
+```
+
+```{r, echo = FALSE}
+ggplot(surface_geop, aes(x, y)) +
+  geom_raster(aes(fill = surface.geopotential)) +
+  scale_fill_viridis_c() +
+  coord_quickmap() +
+  theme_void() +
+  ggtitle('CESM LME Topography')
+```
+
+
+
+Might be interesting to look at snow centroid date too down the road. Spatial patterns notwithstanding, maybe the aggregate temporal patterns are still recoverable?
+
+
+## Empirical Orthogonal Functions
 
 Now run a principal components analysis on the observed SPEI data. Much of the code that follows is adapted from the *wql* and *sinkr* packages.
 
 ```{r}
 obs_pca <- swe_dat %>%
   group_by(x, y) %>%
-  mutate(test = all(SWE== 0)) %>%
+  mutate(test = all(SWE == 0)) %>%
   filter(test == FALSE) %>%
   ungroup() %>%
   select(-test)%>%
@@ -149,18 +315,32 @@ obs_pca <- swe_dat %>%
   select(-x, -y) %>%
   t() %>%
   prcomp(scale. = TRUE)
+
+sim_pca <- cesm_dat %>%
+  filter(year > 1900) %>%
+  group_by(x, y) %>%
+  mutate(test = all(SWE == 0)) %>%
+  filter(test == FALSE) %>%
+  ungroup() %>%
+  select(-test) %>%
+  spread(year, SWE) %>%
+  select(-x, -y, -area) %>%
+  t() %>%
+  prcomp(scale. = TRUE)
 ```
 
 ```{r, echo = FALSE}
-library(broom)
 obs_eigs <- obs_pca %>%
+  tidy(matrix = 'pcs') %>%
+  mutate(eigenvalues = std.dev ^ 2)
+sim_eigs <- sim_pca %>%
   tidy(matrix = 'pcs') %>%
   mutate(eigenvalues = std.dev ^ 2)
 ```
 
 
 
-```{r plot_variance_obs, fig.width = 5, fig.height = 4, echo = FALSE, fig.cap = 'Percent variance explained by the leading principal components of the observed SPEI record. PCs that are not well separated can be considered effective multiplets due to temporal autocorrelation, and should not be split in truncation.'}
+```{r plot_variance_obs, fig.width = 5, fig.height = 4, echo = FALSE}
 obs_eigs %>% 
     filter(PC <= 12) %>%
 ggplot(aes(x = PC, y = percent * 100)) +
@@ -175,58 +355,40 @@ ggplot(aes(x = PC, y = percent * 100)) +
 ```
 
 
-Define a function to calculate the empirical orthogonal functions and rotated empirical orthogonal functions, as well as their associated PC amplitude time series. Save all relevant information in a list for later use.
-
-
-
-Use this function to calculate the EOFs and REOFs for the observations and reconstructions, retaining the 6 leading components in each case for rotation.
+```{r plot_variance_sim, fig.width = 5, fig.height = 4, echo = FALSE}
+sim_eigs %>% 
+    filter(PC <= 12) %>%
+ggplot(aes(x = PC, y = percent * 100)) +
+  #geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
+  geom_point(size = 2) + 
+ # geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
+  labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
+  geom_vline(xintercept = 4.5, linetype = 2, color = 'red', alpha = .7) +
+  theme_bw() + 
+  guides(color = F) + 
+  scale_x_continuous(breaks = seq(0, 12, 2))
+```
 
 ```{r calc_eofs}
- eofs <- obs_pca %>% # calculate unrotated EOFs
-    tidy(matrix = 'variables') %>%
-    filter(PC <= 2) %>%
-    left_join(obs_eigs[1:2], by = 'PC') %>%
-    mutate(eof = value * std.dev,
-           PC = as.character(PC)) %>%
-    select(-std.dev, -value) 
+eofs_obs <- obs_pca %>% # calculate unrotated EOFs
+  tidy(matrix = 'variables') %>%
+  filter(PC <= 2) %>%
+  left_join(obs_eigs[1:2], by = 'PC') %>%
+  mutate(eof = value * std.dev,
+         PC = as.character(PC)) %>%
+  select(-std.dev,-value) 
+
+eofs_sim <- sim_pca %>% # calculate unrotated EOFs
+  tidy(matrix = 'variables') %>%
+  filter(PC <= 4) %>%
+  left_join(sim_eigs[1:2], by = 'PC') %>%
+  mutate(eof = value * std.dev,
+         PC = as.character(PC)) %>%
+  select(-std.dev,-value) 
 ```
 
-```{r}
-  varim <- eofs %>% # varimax rotation
-    pivot_wider(names_from = PC, values_from = eof) %>%
-    column_to_rownames(var = 'column') %>%
-    as.matrix %>%
-    varimax
-  rot_mat <- varim$rotmat # rotater
-```
 
-```{r}  
-reofs <- unclass(varim$loadings) %>%
-    as_tibble(rownames = 'column') %>%
-    pivot_longer(-column, names_to = 'PC', values_to = 'reof') %>%
-  mutate(column = as.numeric(column)) %>%
-    right_join(eofs, by = c('column', 'PC'))
-  
-  eof_amps <- obs_pca$x %>%
-    .[,1:2] %>%
-    scale %>%
-    as_tibble(rownames = 'year', .name_repair = ~1:2) %>%
-    gather(PC, eof_amp, -year) %>%
-    mutate(year = as.numeric(str_sub(year, 2)),
-           PC = as.factor(paste0('PC', PC)))
-  
-  reof_amps <- obs_pca$x %>%
-    .[,1:2] %>%
-    scale %>%
-    `%*%`(rot_mat) %>%
-    as_tibble(rownames = 'year', .name_repair = ~1:2) %>%
-    gather(PC, reof_amp, -year) %>%
-    mutate(year = as.numeric(str_sub(year, 2)),
-           PC = as.factor(paste0('PC', PC)))
-```
-
-rotation doesn't do much
-```{r}
+```{r, echo = FALSE}
 swe_dat%>%
     group_by(x, y) %>%
   mutate(test = all(SWE== 0)) %>%
@@ -236,33 +398,61 @@ swe_dat%>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
-  full_join(reofs) %>%
-  ggplot(aes(x, y, fill = reof)) +
-  geom_raster() +
-  facet_wrap(~PC) +
-  scale_fill_distiller(palette = 'RdBu') +
-  theme_void()+
-  coord_quickmap()
-```
-
-```{r}
-swe_dat%>%
-    group_by(x, y) %>%
-  mutate(test = all(SWE== 0)) %>%
-  filter(test == FALSE) %>%
-  ungroup() %>%
-  select(-test) %>%
-  spread(year, SWE) %>%
-  mutate(column = 1:n()) %>%
-  select(x, y, column) %>%
-  full_join(reofs) %>%
+  full_join(eofs_obs) %>%
   ggplot(aes(x, y, fill = eof)) +
   geom_raster() +
   facet_wrap(~PC) +
-  scale_fill_distiller(palette = 'RdBu') +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
   theme_void()+
-  coord_quickmap()
+  coord_quickmap() +
+  ggtitle('Observed April 1st SWE EOFS')
 ```
+
+```{r, echo = FALSE}
+cesm_dat %>%
+  filter(year > 1900) %>%
+  group_by(x, y) %>%
+  mutate(test = all(SWE== 0)) %>%
+  filter(test == FALSE) %>%
+  ungroup() %>%
+  select(-test) %>%
+  spread(year, SWE) %>%
+  mutate(column = 1:n()) %>%
+  select(x, y, column) %>%
+  full_join(eofs_sim) %>%
+  ggplot(aes(x, y, fill = eof)) +
+  geom_raster() +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  theme_void()+
+  coord_quickmap() +
+  ggtitle('Simulated SWE EOFs')
+```
+
+
+## Other Analyses
+
+### Trend Analysis
+```{r cache = TRUE}
+m1 <- bam(SWE ~ te(x, y, by = year, k = 20), data = snow_dat)
+```
+
+```{r}
+summary(m1)
+```
+Looks good down here, but these are in absolute numbers. Maybe rescale to look at relative change?
+
+```{r, echo = TRUE}
+snow_dat %>%
+  filter(year == 1999) %>%
+  mutate(pred = predict(m1, ., type = 'response')) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = pred)) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits = c(-1000, 1000))
+```
+
+
+### Snow Density
 
 First let's model the relationship between snow depth and snow water equivalent (i.e. snow density) in the observations.
 
@@ -272,12 +462,16 @@ snow_dat %>%
   geom_point()
 ```
 
-```{r}
+```{r, cache = TRUE}
 m2 <- bam(SWE ~ s(DEPTH), data = snow_dat, discrete = TRUE)
+```
 
+```{r}
 plot(m2)
 summary(m2)
+```
 
+```{r, echo = FALSE}
 test <- snow_dat %>%
   mutate(error = SWE - predict(m2, .))
 
@@ -290,72 +484,40 @@ test %>%
   coord_quickmap()+
   theme_void()
 ```
-Compare to climatological data for annual temperature range.
-
-```{r}
-temp_range <- brick('data/CHELSA_bio10_07.tif') %>%
-  crop(bbox)%>%
-  `/`(10)
-
-prec_djf <- (raster('data/CHELSA_prec_01_V1.2_land.tif') + 
-  raster('data/CHELSA_prec_02_V1.2_land.tif') + 
-  raster('data/CHELSA_prec_12_V1.2_land.tif')) %>%
-  crop(bbox) %>%
-  `/`(3)
-```
-
-```{r}
-plot(prec_djf)
-```
-
-```{r}
-plot(temp_range/10)
-```
 
 
-```{r}
-swe_dat %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = SWE)) +
-  scale_fill_viridis_c() +
-  coord_quickmap()+
-  theme_void() +
-  ggtitle("April 1st, {closest_state}") +
-  transition_states(year)
-```
 
+### Temporal Autocorrelation
 
-```{r, warning = FALSE}
+```{r, echo = FALSE, warning = FALSE}
 swe_dat %>%
   group_by(x, y) %>%
   mutate(rho = cor(SWE, lag(SWE), use = 'complete.obs')) %>%
    ggplot(aes(x, y)) +
   geom_raster(aes(fill = rho)) +
-  scale_fill_viridis_c() +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits =c(-1, 1)) +
+  coord_quickmap()+
+  theme_void() 
+```
+
+```{r, echo = FALSE, warning = FALSE}
+cesm_dat %>%
+  group_by(x, y) %>%
+  mutate(rho = cor(SWE, lag(SWE), use = 'complete.obs')) %>%
+   ggplot(aes(x, y)) +
+  geom_raster(aes(fill = rho)) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits =c(-1, 1)) +
   coord_quickmap()+
   theme_void() 
 ```
 
 
 ```{r}
-snow_dat %>%
-  group_by(year) %>%
-  summarise(SWE = sum(SWE, na.rm = TRUE)) %>%
-  ggplot(aes(year, SWE)) +
-  geom_col(aes(fill = SWE)) +
-  scale_fill_viridis_c()
+knitr::knit_exit()
 ```
 
 ## Paleo
-```{r}
-brick('data/trace.01-36.22000BP.cam2.SNOWHLND.22000BP_decavg_400BCE.nc') %>%
-  rotate() %>%
-  crop(bbox, snap = 'out') %>% plot 
 
-brick('data/trace.01-36.22000BP.clm2.SNOWDP.22000BP_decavg_400BCE.nc', varname = 'SNOWDP') %>%
-  rotate() %>%
-  crop(bbox, snap = 'out') %>% plot 
-```
 
 
 ## Reanalysis
@@ -452,6 +614,8 @@ dat2 %>%
   scale_fill_viridis_c()
 ```
 
+
+
 ```{r}
 mod <- dat2 %>%
   mutate(start = if_else(water_year == min(water_year), TRUE, FALSE)) %>%
@@ -460,4 +624,27 @@ mod <- dat2 %>%
 
 summary(mod)
 plot(mod, scheme = 1)
+```
+
+
+Compare to climatological data for annual temperature range.
+
+```{r}
+temp_range <- brick('data/CHELSA_bio10_07.tif') %>%
+  crop(bbox)%>%
+  `/`(10)
+
+prec_djf <- (raster('data/CHELSA_prec_01_V1.2_land.tif') + 
+  raster('data/CHELSA_prec_02_V1.2_land.tif') + 
+  raster('data/CHELSA_prec_12_V1.2_land.tif')) %>%
+  crop(bbox) %>%
+  `/`(3)
+```
+
+```{r}
+plot(prec_djf)
+```
+
+```{r}
+plot(temp_range/10)
 ```
