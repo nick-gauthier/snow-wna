@@ -25,19 +25,19 @@ library(raster) # processing raster data
 library(tidyverse) # data manipulation and visualization
 library(mgcv) # flexible nonlinear regression models
 library(furrr) # parallel processing
+library(sf) # shapefiles and plotting
 library(gganimate) # animated gifs
 library(ggridges) # ridge plots
 library(broom) # tidying model objects
 ```
 
-## Main Analysis
 
 Define a study area to constrain all computaitons.
 ```{r}
 bbox <- extent(c(-125, -104, 33, 50))
 ```
 
-### Observations
+## Observations
 
 Import the snow observation data from https://nsidc.org/data/nsidc-0719.^[What's up with this warning message? long_name=CRS definition
 spatial_ref=GEOGCS["NAD83",DATUM["North_American_Datum_1983",SPHEROID["GRS 1980",6378137,298.257222101,AUTHORITY["EPSG","7019"]],AUTHORITY["EPSG","6269"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.01745329251994328,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4269"]]
@@ -103,14 +103,26 @@ snow_dat <- swe_dat %>%
   left_join(elev_dat, by = c('x', 'y'))
 ```
 
+```{r, echo = FALSE}
+# not shown, download state boundary files
+state_names <- c('arizona', 'new mexico', 'colorado', 
+                 'california', 'utah', 'nevada', 
+                 'oregon', 'washington', 'idaho',
+                 'wyoming', 'montana')
+
+states_wus <- maps::map('state', regions = state_names, 
+                    fill = TRUE, plot = FALSE) %>% st_as_sf
+```
+
 Look at how SWE has varied over time and space.
 
 ```{r animation, echo = FALSE, cache = TRUE}
 swe_dat %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = SWE)) +
+  ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
   scale_fill_viridis_c() +
-  coord_quickmap()+
+  coord_quickmap() +
+  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
   theme_void() +
   ggtitle("Snow Water Equivalent", "April 1st, {closest_state}") +
   transition_states(year)
@@ -154,14 +166,13 @@ ggplot(snow_agg, aes(area, SWE)) +
   labs(x = 'Area (km2)', title = 'Relationship between total SWE and snow extent')
 ```
 
-
-
-### Simulations
+## Comarison to Paleo Simulations
 
 ```{r}
 cesm_h2osno <- preprocess('~/Downloads/b.e11.BLMTRC5CN.f19_g16.001.clm2.h1.H2OSNO.08500101-18491231.nc',
                           var = 'H2OSNO',
                           flip = TRUE)
+
 cesm_h2osno_ext <- preprocess('~/Downloads/b.e11.BLMTRC5CN.f19_g16.001.clm2.h1.H2OSNO.18500101-20051231.nc',
                           var = 'H2OSNO',
                           flip = TRUE)
@@ -186,10 +197,11 @@ cesm_dat <- c(cesm_h2osno, cesm_h2osno_ext) %>%
 ```{r animation_cesm, echo = FALSE, cache = TRUE}
 cesm_dat %>%
   filter(year < 1000) %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = SWE)) +
+  ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
+  geom_sf(data = states_wus, fill = NA, colour = 'white', color = 1.2) +
   scale_fill_viridis_c() +
-  coord_quickmap()+
+  coord_sf()+
   theme_void() +
   ggtitle("Simulated Snow Water Equivalent", "April 1st, {closest_state}") +
   transition_states(year)
@@ -237,9 +249,9 @@ snow_dat %>%
   filter(year <= 2005) %>%
   group_by(x, y) %>%
   summarise(SWE = mean(SWE))%>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = SWE)) +
-  coord_quickmap() +
+  ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
+  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
   theme_void() +
   scale_fill_viridis_c() +
   ggtitle('Observed mean April 1st SWE, 1982-2005', 'CESM LME extension')
@@ -262,9 +274,10 @@ swe_obs_resamp <- swe_obs %>%
 
 left_join(swe_obs_resamp, mean_swe_cesm_ext, by = c('x', 'y')) %>%
   gather(type, SWE, 3:4) %>%
-ggplot(aes(x, y)) +
-  geom_raster(aes(fill = SWE)) +
+ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
   coord_quickmap() +
+  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
   theme_void() +
   facet_wrap(~type) +
   scale_fill_viridis_c() +
@@ -287,10 +300,10 @@ landfrac <- raster('data/consistent-topo-fv1.9x2.5_c130424.nc',
 ```
 
 ```{r, echo = FALSE}
-ggplot(surface_geop, aes(x, y)) +
-  geom_raster(aes(fill = surface.geopotential)) +
+ggplot(surface_geop) +
+  geom_raster(aes(x, y, fill = surface.geopotential)) +
   scale_fill_viridis_c() +
-  coord_quickmap() +
+  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
   theme_void() +
   ggtitle('CESM LME Topography')
 ```
@@ -300,7 +313,7 @@ ggplot(surface_geop, aes(x, y)) +
 Might be interesting to look at snow centroid date too down the road. Spatial patterns notwithstanding, maybe the aggregate temporal patterns are still recoverable?
 
 
-## Empirical Orthogonal Functions
+### Empirical Orthogonal Functions
 
 Now run a principal components analysis on the observed SPEI data. Much of the code that follows is adapted from the *wql* and *sinkr* packages.
 
@@ -399,12 +412,12 @@ swe_dat%>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
   full_join(eofs_obs) %>%
-  ggplot(aes(x, y, fill = eof)) +
-  geom_raster() +
+  ggplot() +
+  geom_raster(aes(x, y, fill = eof)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black', color = 1.2) +
   facet_wrap(~PC) +
   scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
   theme_void()+
-  coord_quickmap() +
   ggtitle('Observed April 1st SWE EOFS')
 ```
 
@@ -420,19 +433,19 @@ cesm_dat %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
   full_join(eofs_sim) %>%
-  ggplot(aes(x, y, fill = eof)) +
-  geom_raster() +
+  ggplot() +
+  geom_raster(aes(x, y, fill = eof)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black', color = 1.2) +
   facet_wrap(~PC) +
   scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
   theme_void()+
-  coord_quickmap() +
   ggtitle('Simulated SWE EOFs')
 ```
 
 
-## Other Analyses
+### Other Analyses
 
-### Trend Analysis
+#### Trend Analysis
 ```{r cache = TRUE}
 m1 <- bam(SWE ~ te(x, y, by = year, k = 20), data = snow_dat)
 ```
@@ -452,7 +465,7 @@ snow_dat %>%
 ```
 
 
-### Snow Density
+#### Snow Density
 
 First let's model the relationship between snow depth and snow water equivalent (i.e. snow density) in the observations.
 
@@ -487,7 +500,7 @@ test %>%
 
 
 
-### Temporal Autocorrelation
+#### Temporal Autocorrelation
 
 ```{r, echo = FALSE, warning = FALSE}
 swe_dat %>%
@@ -512,15 +525,11 @@ cesm_dat %>%
 ```
 
 
-```{r}
-knitr::knit_exit()
-```
-
-## Paleo
-
-
-
 ## Reanalysis
+
+So the question now is whether the mismatch between observed and simulated SWE is due to the meteorolgical forcing. That is, if only we had better temperature and precipitation simulations then we could model SWE as a simple function of those. To examine this, use reanalysis data.
+
+Start by importing ERA5 data.
 ```{r}
 ncdf_file <- 'data/adaptor.mars.internal-1566933160.7965047-18657-23-b3ae7b43-15db-4890-bc5b-4d3413fe4ddd.nc'
 ref <- brick(ncdf_file, var = 'sd') %>% 
@@ -528,102 +537,107 @@ ref <- brick(ncdf_file, var = 'sd') %>%
   rotate %>%
   crop(bbox)
 
-elev <- resample(elev, ref)
+elev2 <- resample(elev[[1]], ref)
+```
 
+We need to use snowdepth rather than SWE, but as shown above this isn't a huge deal in the long run. Here just import April snowdepths, which we'll use as a rough equivalent for April 1st SWE.
+```{r}
 snowdepth <- brick(ncdf_file, var = 'sd') %>% 
+  .[[seq(4,484, 12)]] %>% # get april
   rotate %>%
   crop(bbox) %>%
-  mask(elev) %>%
-  as.data.frame(xy = TRUE, long = TRUE) %>%
-  rename(time = Z, sd = value)
+  mask(elev2) %>%
+  as.data.frame(xy = TRUE, long = TRUE, na.rm = TRUE) %>%
+  rename(time = layer, sd = value)
+```
 
+Also import temperature and precipiation for all months.
+```{r}
 temp <- brick(ncdf_file, var = 't2m') %>% 
   rotate %>%
   crop(bbox) %>%
-  mask(elev) %>%
-  as.data.frame(xy = TRUE, long = TRUE) %>%
+  mask(elev2) %>%
+  as.data.frame(xy = TRUE, long = TRUE, na.rm = TRUE) %>%
   rename(time = Z, t2m = value)
 
 precip <- brick(ncdf_file, var = 'tp') %>% 
   rotate %>%
   crop(bbox) %>%
-  mask(elev) %>%
-  as.data.frame(xy = TRUE, long = TRUE) %>%
+  mask(elev2) %>%
+  as.data.frame(xy = TRUE, long = TRUE, na.rm = TRUE) %>%
   rename(time = Z, tp = value)
 ```
 
-
-
+Calculate the mean temperature and total precipitation for Oct-Mar to see if there's any relationship to snowdepth.
 ```{r}
-dat <- snowdepth %>%
+dat <- precip %>%
   left_join(temp, by = c('x', 'y', 'time')) %>%
-  left_join(precip, by = c('x', 'y', 'time')) %>%
-  as_tibble %>%
+  mutate(t2m = t2m - 273.15) %>%
   separate(time, into = c('year', 'month', 'day'), convert = TRUE) %>%
-  select(-day) %>%
-  mutate(t2m = t2m - 273.15,
-         season = case_when(month %in% c(12, 1, 2) ~ 'DJF',
-                            month %in% c(3, 4, 5) ~ 'MAM',
-                            month %in% c(6, 7, 8) ~ 'JJA',
-                            month %in% c(9, 10, 11) ~ 'SON'))
-```
-
-```{r}
-ggplot(dat, aes(t2m, sd)) +
-  geom_point(alpha = .5) +
-  facet_wrap(~season) +
-  theme_bw()
-```
-
-```{r}
-dat2 <- dat %>%
   mutate(water_year = if_else(month < 10, year, year + 1L)) %>%
   filter(between(water_year, 1980, 2018)) %>%
+  filter(month %in% c(1:3, 9:12)) %>%
   group_by(x, y, water_year) %>%
-  summarise(sd = sum(sd), t2m = mean(t2m), tp = sum(tp))
+  summarise(t2m = mean(t2m), tp = sum(tp))
 ```
 
-
+Combine all the data.
 ```{r}
+dat2 <- snowdepth %>%
+  mutate(time = str_sub(time, start = 2)) %>%
+  separate(time, into = c('year', 'month', 'day'), convert = TRUE) %>%
+  select(-day, -month) %>%
+  left_join(dat, by = c('x', 'y', 'year' = 'water_year')) %>%
+  remove_missing()
+```
+
+The spatial and temporal variability of the reanalysis snow depth looks close to observations, so that's a good sign.
+
+```{r, echo = FALSE, cache = TRUE}
 dat2 %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = sd)) +
+  ggplot() +
+  geom_raster(aes(x, y, fill = sd)) +
   scale_fill_viridis_c() +
-  coord_quickmap()+
+  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
   theme_void() +
   ggtitle("Year: {closest_state}") +
-  transition_states(water_year)
+  transition_states(year)
 ```
 
-```{r}
-dat2 %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = sd)) +
-  scale_fill_viridis_c() +
-  facet_wrap(~water_year) +
-  coord_quickmap()+
-  theme_void()
-```
-
-```{r}
-dat2 %>%
-  group_by(water_year) %>%
-  summarise(sd = sum(sd, na.rm = TRUE)) %>%
-  ggplot(aes(water_year, sd)) +
-  geom_col(aes(fill = sd)) +
-  scale_fill_viridis_c()
-```
-
-
+Fit a GAM predicting snow depth as a nonlinear interaction between seasonal temperature and precipitation. Include terms to account for spatial and temporal autocorrelation
 
 ```{r}
 mod <- dat2 %>%
-  mutate(start = if_else(water_year == min(water_year), TRUE, FALSE)) %>%
-  filter(sd > 0) %>%
+  mutate(start = if_else(year == min(year), TRUE, FALSE)) %>%
+  arrange(x, y) %>%
   bam(sd ~ te(t2m, tp) + te(x,y), data = ., AR.start = start)
+```
 
+The model performs suprisingly well.
+```{r}
 summary(mod)
 plot(mod, scheme = 1)
+```
+
+Plotting the results, it does indeed look like we can predict SWE/snow depth, or at least climatological SWE, from temperature and precipitation data.
+```{r, echo = FALSE}
+dat2 %>%
+  mutate(pred = predict(mod, .)) %>%
+  group_by(x, y) %>%
+  summarise(Simulated = mean(sd), Predicted = mean(pred)) %>%
+  gather(type, value, 3:4) %>%
+  ggplot() +
+  scale_fill_viridis_c() +
+  geom_raster(aes(x, y, fill = value)) +
+  facet_wrap(~type) +
+  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
+  theme_void() +
+  ggtitle('Simulated vs predicted snow depth based on meteorological data', 'ERA5 Reanalysis')
+```
+
+
+```{r, echo = FALSE}
+knitr::knit_exit()
 ```
 
 
