@@ -116,13 +116,13 @@ states_wus <- maps::map('state', regions = state_names,
 
 Look at how SWE has varied over time and space.
 
-```{r animation, echo = FALSE, cache = TRUE}
+```{r animation, echo = FALSE, warning=FALSE,cache = TRUE}
 swe_dat %>%
   ggplot() +
   geom_raster(aes(x, y, fill = SWE)) +
   scale_fill_viridis_c() +
   coord_quickmap() +
-  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
+  geom_sf(data = states_wus, fill = NA, color = 'white') +
   theme_void() +
   ggtitle("Snow Water Equivalent", "April 1st, {closest_state}") +
   transition_states(year)
@@ -139,7 +139,7 @@ snow_agg <- snow_dat %>%
 ```
 
 How has total SWE varied over the observational period?
-```{r, echo = FALSE}
+```{r, echo = FALSE, fig.fullwidth = TRUE}
 ggplot(snow_agg, aes(year, SWE)) +
   #geom_vline(xintercept = 2015, color = 'red', linetype = 2) +
   geom_col(aes(fill = SWE)) +
@@ -149,7 +149,7 @@ ggplot(snow_agg, aes(year, SWE)) +
 ```
 
 What about total area covered?
-```{r, echo = FALSE}
+```{r, echo = FALSE, fig.fullwidth = TRUE}
 ggplot(snow_agg, aes(year, area)) +
   geom_col(aes(fill = area)) +
   scale_fill_viridis_c(guide = FALSE) +
@@ -166,7 +166,7 @@ ggplot(snow_agg, aes(area, SWE)) +
   labs(x = 'Area (km2)', title = 'Relationship between total SWE and snow extent')
 ```
 
-## Comarison to Paleo Simulations
+## CESM-LME Comparison
 
 ```{r}
 cesm_h2osno <- preprocess('~/Downloads/b.e11.BLMTRC5CN.f19_g16.001.clm2.h1.H2OSNO.08500101-18491231.nc',
@@ -199,7 +199,7 @@ cesm_dat %>%
   filter(year < 1000) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = SWE)) +
-  geom_sf(data = states_wus, fill = NA, colour = 'white', color = 1.2) +
+  geom_sf(data = states_wus, fill = NA, colour = 'white') +
   scale_fill_viridis_c() +
   coord_sf()+
   theme_void() +
@@ -214,7 +214,7 @@ cesm_agg <- cesm_dat %>%
   mutate(avg = zoo::rollmean(SWE, k = 100, na.pad = TRUE))
 ```
 
-```{r, echo = FALSE}
+```{r, echo = FALSE, warning = FALSE}
 ggplot(cesm_agg, aes(year, SWE)) +
   geom_line(alpha = .3) +
   #geom_point(aes(color = SWE)) +
@@ -222,10 +222,10 @@ ggplot(cesm_agg, aes(year, SWE)) +
   scale_color_viridis_c(guide = FALSE) +
   geom_smooth(method = 'gam', formula = y ~ s(x, bs = "cs", k = 30)) +
   theme_minimal() +
-  ggtitle('')
+  ggtitle('Simulated SWE over the Last Millennium')
 ```
 
-So there's a clear bias here. The mean of the observations is well higher than it should be. Looks like the simulation underpredicts snow -- likely because of all the small-scale topographic influences that CESM can't resolve.
+So there's a clear bias here. As we see below, the mean of the observations is well higher than it should be. Looks like the simulation underpredicts snow -- likely because of all the small-scale topographic influences that CESM can't resolve.
 ```{r, echo = FALSE, fig.width = 3.5, fig.height = 8}
 mod_avg <- snow_agg %>% 
   summarise(SWE = mean(SWE)) %>%
@@ -244,14 +244,14 @@ cesm_agg %>%
 Let's compare the observations and simulation directly.
 
 What's the climatic mean April 1st SWE for the observations and simulations?
-```{r, echo = FALSE}
+```{r, echo = FALSE, warning = FALSE}
 snow_dat %>%
   filter(year <= 2005) %>%
   group_by(x, y) %>%
   summarise(SWE = mean(SWE))%>%
   ggplot() +
   geom_raster(aes(x, y, fill = SWE)) +
-  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
+  geom_sf(data = states_wus, fill = NA, color = 'white') +
   theme_void() +
   scale_fill_viridis_c() +
   ggtitle('Observed mean April 1st SWE, 1982-2005', 'CESM LME extension')
@@ -276,8 +276,7 @@ left_join(swe_obs_resamp, mean_swe_cesm_ext, by = c('x', 'y')) %>%
   gather(type, SWE, 3:4) %>%
 ggplot() +
   geom_raster(aes(x, y, fill = SWE)) +
-  coord_quickmap() +
-  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
+  geom_sf(data = states_wus, fill = NA, color = 'white') +
   theme_void() +
   facet_wrap(~type) +
   scale_fill_viridis_c() +
@@ -303,7 +302,7 @@ landfrac <- raster('data/consistent-topo-fv1.9x2.5_c130424.nc',
 ggplot(surface_geop) +
   geom_raster(aes(x, y, fill = surface.geopotential)) +
   scale_fill_viridis_c() +
-  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
+  geom_sf(data = states_wus, fill = NA, color = 'white') +
   theme_void() +
   ggtitle('CESM LME Topography')
 ```
@@ -414,7 +413,7 @@ swe_dat%>%
   full_join(eofs_obs) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = eof)) +
-  geom_sf(data = states_wus, fill = NA, color = 'black', color = 1.2) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
   facet_wrap(~PC) +
   scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
   theme_void()+
@@ -435,95 +434,12 @@ cesm_dat %>%
   full_join(eofs_sim) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = eof)) +
-  geom_sf(data = states_wus, fill = NA, color = 'black', color = 1.2) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
   facet_wrap(~PC) +
   scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
   theme_void()+
   ggtitle('Simulated SWE EOFs')
 ```
-
-
-### Other Analyses
-
-#### Trend Analysis
-```{r cache = TRUE}
-m1 <- bam(SWE ~ te(x, y, by = year, k = 20), data = snow_dat)
-```
-
-```{r}
-summary(m1)
-```
-Looks good down here, but these are in absolute numbers. Maybe rescale to look at relative change?
-
-```{r, echo = TRUE}
-snow_dat %>%
-  filter(year == 1999) %>%
-  mutate(pred = predict(m1, ., type = 'response')) %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = pred)) +
-  scale_fill_distiller(palette = 'RdBu', direction = 1, limits = c(-1000, 1000))
-```
-
-
-#### Snow Density
-
-First let's model the relationship between snow depth and snow water equivalent (i.e. snow density) in the observations.
-
-```{r}
-snow_dat %>%
-  ggplot(aes(DEPTH, SWE)) +
-  geom_point()
-```
-
-```{r, cache = TRUE}
-m2 <- bam(SWE ~ s(DEPTH), data = snow_dat, discrete = TRUE)
-```
-
-```{r}
-plot(m2)
-summary(m2)
-```
-
-```{r, echo = FALSE}
-test <- snow_dat %>%
-  mutate(error = SWE - predict(m2, .))
-
-test %>%
-  filter(year %in% 1995:2000) %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = error)) +
-  scale_fill_distiller(palette = 'RdBu', direction = 1, limits =c(-660, 580)) +
-  facet_wrap(~year) +
-  coord_quickmap()+
-  theme_void()
-```
-
-
-
-#### Temporal Autocorrelation
-
-```{r, echo = FALSE, warning = FALSE}
-swe_dat %>%
-  group_by(x, y) %>%
-  mutate(rho = cor(SWE, lag(SWE), use = 'complete.obs')) %>%
-   ggplot(aes(x, y)) +
-  geom_raster(aes(fill = rho)) +
-  scale_fill_distiller(palette = 'RdBu', direction = 1, limits =c(-1, 1)) +
-  coord_quickmap()+
-  theme_void() 
-```
-
-```{r, echo = FALSE, warning = FALSE}
-cesm_dat %>%
-  group_by(x, y) %>%
-  mutate(rho = cor(SWE, lag(SWE), use = 'complete.obs')) %>%
-   ggplot(aes(x, y)) +
-  geom_raster(aes(fill = rho)) +
-  scale_fill_distiller(palette = 'RdBu', direction = 1, limits =c(-1, 1)) +
-  coord_quickmap()+
-  theme_void() 
-```
-
 
 ## Reanalysis
 
@@ -598,7 +514,7 @@ dat2 %>%
   ggplot() +
   geom_raster(aes(x, y, fill = sd)) +
   scale_fill_viridis_c() +
-  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
+  geom_sf(data = states_wus, fill = NA, color = 'white') +
   theme_void() +
   ggtitle("Year: {closest_state}") +
   transition_states(year)
@@ -630,11 +546,104 @@ dat2 %>%
   scale_fill_viridis_c() +
   geom_raster(aes(x, y, fill = value)) +
   facet_wrap(~type) +
-  geom_sf(data = states_wus, fill = NA, color = 'white', color = 1.2) +
+  geom_sf(data = states_wus, fill = NA, color = 'white') +
   theme_void() +
   ggtitle('Simulated vs predicted snow depth based on meteorological data', 'ERA5 Reanalysis')
 ```
 
+
+## Other Analyses
+
+### Trend Analysis
+
+Fit a geographically weighted regression to look at spatially varying SWE trends in the observations.
+```{r cache = TRUE}
+m1 <- bam(SWE ~ te(x, y, by = year, k = 20), data = snow_dat)
+```
+
+The model's fine ... not good, not great.
+```{r}
+summary(m1)
+```
+Looks good down here, but these are in absolute numbers. Maybe rescale to look at relative change?
+
+```{r, echo = FALSE}
+snow_dat %>%
+  filter(year == 1999) %>%
+  mutate(pred = predict(m1, ., type = 'response')) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = pred)) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits = c(-1000, 1000)) +
+    geom_sf(data = states_wus, fill = NA, color = 'black') +
+theme_void() +
+  ggtitle('Estimated SWE trends in observations', '. . . maybe . . .')
+```
+
+
+### Snow Density
+
+Let's model the relationship between snow depth and snow water equivalent (i.e. snow density) in the observations. Looks like its roughly linear.
+
+```{r}
+snow_dat %>%
+  ggplot(aes(DEPTH, SWE)) +
+  geom_point() +
+  theme_minimal()
+```
+
+```{r, cache = TRUE}
+m2 <- bam(SWE ~ s(DEPTH), data = snow_dat, discrete = TRUE)
+```
+
+The GAM explains 98% of the deviance, so not bad at all.
+```{r}
+plot(m2)
+summary(m2)
+```
+
+The residuals from the (roughly) linaer fit between SWE and depth show some interesting structure. Might be worthwhile to explore later.
+
+```{r, echo = FALSE}
+test <- snow_dat %>%
+  mutate(error = SWE - predict(m2, .))
+
+test %>%
+  filter(year %in% 1995:2000) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = error)) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits =c(-660, 580)) +
+  facet_wrap(~year) +
+  
+  coord_quickmap()+
+  theme_void()
+```
+
+
+
+### Temporal Autocorrelation
+
+What about the temporal autocorrelation in the observations and simulations?
+```{r, echo = FALSE, warning = FALSE}
+swe_dat %>%
+  group_by(x, y) %>%
+  mutate(rho = cor(SWE, lag(SWE), use = 'complete.obs')) %>%
+   ggplot(aes(x, y)) +
+  geom_raster(aes(fill = rho)) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits =c(-1, 1)) +
+  coord_quickmap()+
+  theme_void() 
+```
+
+```{r, echo = FALSE, warning = FALSE}
+cesm_dat %>%
+  group_by(x, y) %>%
+  mutate(rho = cor(SWE, lag(SWE), use = 'complete.obs')) %>%
+   ggplot(aes(x, y)) +
+  geom_raster(aes(fill = rho)) +
+  scale_fill_distiller(palette = 'RdBu', direction = 1, limits =c(-1, 1)) +
+  coord_quickmap()+
+  theme_void() 
+```
 
 ```{r, echo = FALSE}
 knitr::knit_exit()
