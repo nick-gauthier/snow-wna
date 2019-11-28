@@ -88,16 +88,31 @@ ggplot(aes(x = PC, y = percent * 100)) +
   guides(color = F) + 
   scale_x_continuous(breaks = seq(0, 12, 2))
 ```
+```{r}
+library(broom)
+```
+
 
 ```{r calc_eofs}
 eofs_era <- era_pca %>% # calculate unrotated EOFs
   broom::tidy(matrix = 'variables') %>%
-  filter(PC <= 4) %>%
+  filter(PC <= 6) %>%
   left_join(era_eigs[1:2], by = 'PC') %>%
   mutate(eof = value * std.dev,
          PC = as.character(PC)) %>%
   select(-std.dev,-value) 
 ```
+
+```{r}
+tidy(era_pca) %>%
+  mutate(time = parse_date(str_sub(row, 2), format = '%Y.%m.%d')) %>%
+  filter(PC <=6) %>%
+  ggplot(aes(time, value)) +
+  geom_line() +
+  facet_wrap(~PC)
+```
+
+
 
 
 ```{r, echo = FALSE}
@@ -113,7 +128,57 @@ era %>%
   scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
   theme_void()+
   coord_quickmap() +
-  ggtitle('Simulated SWE EOFs')
+  ggtitle('Simulated Precipitation EOFs')
+```
+
+```{r}
+pcs <- tidy(era_pca) %>%
+  mutate(time = parse_date(str_sub(row, 2), format = '%Y.%m.%d')) %>%
+  filter(PC <=6) %>%
+  mutate(PC = paste0('PC', PC)) %>%
+  spread(PC, value)
+```
+
+
+```{r}
+test <- prism %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(time = str_split(layer, pattern = '_'),
+         time = map_chr(time, ~.[5])) %>%
+  mutate(time = parse_date(time, format = '%Y%m')) %>%
+  select(-layer) %>%
+  left_join(pcs) 
+```
+
+```{r}
+library(mgcv)
+
+mod1 <- bam(value ~ te(x, y, by = PC1) + te(x, y, by = PC2) + te(x, y, by = PC3) + te(x, y, by = PC4) + PC1 + PC2 + PC3 + PC4, data = test)
+
+summary(mod1)
+
+plot(mod1, scheme = 2)
+
+test %>%
+  mutate(pred = predict(mod1, .),
+         res = pred - value) %>%
+  filter(time < as.Date('1982-01-01')) %>%
+  ggplot(aes(x, y, fill = res)) +
+  geom_raster() +
+  coord_quickmap() +
+  facet_wrap(~time)
+```
+
+ok so the one-off regressions are missing the mountains! an obvious suggestion is that the bandwidth on the tensor splines is too large so it can't resoluve those 
+
+```{r}
+test2 <- test %>%
+  group_by(x,y) %>%
+  nest %>%
+  mutate(mod = future_map(data, ~lm(value ~ PC1 + PC2 + PC3 + PC4, data = .), .progress = TRUE),
+         pred = future_map(mod, ~predict)) %>%
+  select(-mod) %>%
+  unnest
 ```
 
 
