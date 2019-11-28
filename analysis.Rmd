@@ -467,7 +467,7 @@ snowdepth <- brick(ncdf_file, var = 'sd') %>%
   rename(time = layer, sd = value)
 ```
 
-Also import temperature and precipiation for all months.
+Also import temperature and precipitation for all months.
 ```{r}
 temp <- brick(ncdf_file, var = 't2m') %>% 
   rotate %>%

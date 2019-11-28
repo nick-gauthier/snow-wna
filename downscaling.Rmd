@@ -1,0 +1,174 @@
+---
+title: "Downscaling"
+author: "Nick Gauthier"
+date: "11/26/2019"
+output: html_document
+---
+
+
+```{r setup, message = FALSE, warning = FALSE}
+library(raster) # processing raster data
+library(tidyverse) # data manipulation and visualization
+```
+
+
+Define a study area to constrain all computaitons.
+```{r}
+bbox_wus <- extent(c(-125, -100, 33, 50))
+bbox_co <- extent(c(-110, -105, 40, 45))
+```
+
+```{r}
+library(furrr)
+plan(multisession)
+```
+
+```{r, warning = FALSE}
+prism <- list.files('~/Downloads/PRISM/PRISM_ppt_stable_4kmM3_198101_201904_bil', 
+                    pattern = '*.bil$',
+                    full.names = TRUE) %>%
+  future_map(raster) %>%
+  future_map(crop, bbox_wus) %>%
+  brick() %>%
+  projectRaster(crs = '+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0') %>%
+  crop(bbox_co) %>%
+  aggregate(fact = 3)
+
+plot(prism)
+```
+
+
+```{r}
+ncdf_file <- 'data/adaptor.mars.internal-1566933160.7965047-18657-23-b3ae7b43-15db-4890-bc5b-4d3413fe4ddd.nc'
+ref <- brick(ncdf_file, var = 'sd') %>% 
+  .[[1]]%>%
+  rotate %>%
+  crop(bbox_wus)
+```
+
+```{r}
+elev <- raster('~/gdrive/Data/SRTM_1km.tif') %>%
+  crop(bbox_wus) %>%
+  resample(prism) %>%
+  crop(bbox_co)
+```
+
+
+```{r}
+era <- brick(ncdf_file, var = 'tp') %>% 
+  rotate %>%
+  crop(bbox_wus)
+```
+
+
+```{r}
+era_pca <- era %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
+  select(-x, -y) %>%
+  t() %>%
+  prcomp(scale. = TRUE)
+```
+
+```{r, echo = FALSE}
+era_eigs <- era_pca %>%
+  broom::tidy(matrix = 'pcs') %>%
+  mutate(eigenvalues = std.dev ^ 2)
+```
+
+```{r plot_variance_sim, fig.width = 5, fig.height = 4, echo = FALSE}
+era_eigs %>% 
+    filter(PC <= 12) %>%
+ggplot(aes(x = PC, y = percent * 100)) +
+  #geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
+  geom_point(size = 2) + 
+ # geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
+  labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
+  geom_vline(xintercept = 4.5, linetype = 2, color = 'red', alpha = .7) +
+  theme_bw() + 
+  guides(color = F) + 
+  scale_x_continuous(breaks = seq(0, 12, 2))
+```
+
+```{r calc_eofs}
+eofs_era <- era_pca %>% # calculate unrotated EOFs
+  broom::tidy(matrix = 'variables') %>%
+  filter(PC <= 4) %>%
+  left_join(era_eigs[1:2], by = 'PC') %>%
+  mutate(eof = value * std.dev,
+         PC = as.character(PC)) %>%
+  select(-std.dev,-value) 
+```
+
+
+```{r, echo = FALSE}
+era %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
+  mutate(column = as.character(1:n())) %>%
+  select(x, y, column) %>%
+  full_join(eofs_era) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = eof)) +
+  #geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  theme_void()+
+  coord_quickmap() +
+  ggtitle('Simulated SWE EOFs')
+```
+
+
+```{r}
+sd_coarse <- snowdepth %>%
+  resample(cesm_h2osno)
+
+plot(sd_coarse)
+```
+
+```{r}
+temp <- brick(ncdf_file, var = 't2m') %>% 
+  rotate %>%
+  crop(bbox)
+
+precip <- brick(ncdf_file, var = 'tp') %>% 
+  rotate %>%
+  crop(bbox)
+```
+
+```{r}
+plot(precip)
+```
+
+```{r}
+precip_coarse <- resample(precip, cesm_h2osno)
+```
+
+```{r}
+plot(precip_coarse)
+```
+
+```{r}
+precip <- mask(precip, elev)
+```
+
+
+```{r}
+library(remote)
+```
+
+```{r}
+test <- eot(precip_coarse, precip, n = 6, type = 'rsq')
+```
+
+```{r}
+plot(test, y = 1)
+plot(test, y = 2)
+plot(test, y = 3)
+plot(test, y = 4)
+plot(test, y = 5)
+plot(test, y = 6)
+```
+
+```{r}
+cesm_h2osno
+```
+
