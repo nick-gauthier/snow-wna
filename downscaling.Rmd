@@ -16,6 +16,7 @@ library(lubridate) # working with dates
 library(furrr) # parallel processing
 plan(multisession)
 library(gganimate) # animations
+library(remote) # EOT analysis
 ```
 
 Define a study area to constrain all computaitons.
@@ -130,6 +131,7 @@ a;b
 
 # EOF Analysis
 
+## ERA 
 ```{r}
 era_pca <- era %>%
   spread(water_year, precip) %>%
@@ -203,6 +205,7 @@ pcs_era <- tidy(era_pca) %>%
   spread(PC, value)
 ```
 
+## PRISM
 
 ```{r}
 prism_pca <- prism %>%
@@ -234,8 +237,6 @@ ggplot(aes(x = PC, y = percent * 100)) +
   scale_x_continuous(breaks = seq(0, 12, 2))
 ```
 
-
-
 ```{r calc_eofs}
 eofs_prism <- prism_pca %>% # calculate unrotated EOFs
   broom::tidy(matrix = 'variables') %>%
@@ -246,7 +247,7 @@ eofs_prism <- prism_pca %>% # calculate unrotated EOFs
   select(-std.dev,-value) 
 ```
 
-```{r}
+```{r, echo = FALSE}
 tidy(prism_pca) %>%
   mutate(time = as.numeric(as.character(row))) %>%
   filter(PC <=4) %>%
@@ -281,6 +282,8 @@ pcs_prism <- tidy(prism_pca) %>%
   spread(PC, value)
 ```
 
+
+# CCA Analysis
 ```{r}
 t1 <- pcs_prism %>%
   select(PC1:PC4) %>%
@@ -343,103 +346,10 @@ prism %>%
   ggtitle('Observed CCA')
 ```
 
-## other
-```{r}
-test <- prism %>%
-  ungroup() %>%
-  left_join(pcs) %>%
-  left_join(as.data.frame(elev, xy = TRUE, na.rm = TRUE)) %>%
-  rename(elev = SRTM_1km)
-```
-
-```{r}
-library(mgcv)
-
-mod1 <- bam(precip ~ te(x, y, by = PC1, k = 20) + s(water_year) + PC1, data = test)
-
-summary(mod1)
-
-plot(mod1, scheme = 2)
-
-test %>%
-  mutate(pred = predict(mod1, .),
-         res = pred - precip) %>%
-  ggplot(aes(x, y, fill = pred)) +
-  geom_raster() +
-  coord_quickmap() +
-  facet_wrap(~water_year)
-```
-
-```{r}
-mod2 <- bam(precip ~  s(PC1) + s(PC2) + s(PC3) + s(PC4)+ te(x, y) + s(elev) + s(water_year), data = test, select = TRUE)
-
-summary(mod2)
-
-plot(mod2, scheme = 2)
-
-test %>%
-  mutate(pred = predict(mod2, .),
-         res = pred - precip) %>%
-  ggplot(aes(x, y, fill = res)) +
-  geom_raster() +
-  coord_quickmap() +
-  facet_wrap(~water_year)
-```
-ok so the one-off regressions are missing the mountains! an obvious suggestion is that the bandwidth on the tensor splines is too large so it can't resoluve those 
-
-```{r}
-test2 <- test %>%
-  group_by(x,y) %>%
-  nest %>%
-  mutate(mod = future_map(data, ~lm(precip ~ PC1, data = .), .progress = TRUE),
-         pred = future_map(mod, ~predict(.))) %>%
-  select(-mod) %>%
-  unnest
-```
-
-
-```{r}
-sd_coarse <- snowdepth %>%
-  resample(cesm_h2osno)
-
-plot(sd_coarse)
-```
-
-```{r}
-temp <- brick(ncdf_file, var = 't2m') %>% 
-  rotate %>%
-  crop(bbox)
-
-precip <- brick(ncdf_file, var = 'tp') %>% 
-  rotate %>%
-  crop(bbox)
-```
-
-```{r}
-plot(precip)
-```
-
-```{r}
-precip_coarse <- resample(precip, cesm_h2osno)
-```
-
-```{r}
-plot(precip_coarse)
-```
-
-```{r}
-precip <- mask(precip, elev)
-```
-
-
-```{r}
-library(remote)
-```
+# EOT Analysis
 
 ```{r}
 prism_rast <- prism %>%
-  ungroup %>%
-  select(-avg, -anomaly) %>%
   spread(water_year, precip) %>%
   rasterFromXYZ()
 
@@ -447,23 +357,20 @@ era_rast <- era %>%
   filter(water_year >= 1982) %>%
   spread(water_year, precip) %>%
   rasterFromXYZ()
-
-
-plot(era_rast)
 ```
 
 
 ```{r}
-test <- eot(era_rast, prism_rast, n = 6, type = 'rsq')
+test_eot <- eot(era_rast, prism_rast, n = 6, type = 'rsq')
 ```
 
 ```{r}
-plot(test, y = 1)
-plot(test, y = 2)
-plot(test, y = 3)
-plot(test, y = 4)
-plot(test, y = 5)
-plot(test, y = 6)
+plot(test_eot, y = 1)
+plot(test_eot, y = 2)
+plot(test_eot, y = 3)
+plot(test_eot, y = 4)
+plot(test_eot, y = 5)
+plot(test_eot, y = 6)
 ```
 
 ```{r}
@@ -479,4 +386,4 @@ plot(test2, y = 5)
 plot(test2, y = 6)
 ```
 
-so anomalizing the rasters doesn't change teh spatial patterns, just the percent variance explained .. makes sense
+so anomalizing the rasters doesn't change the spatial patterns, just the percent variance explained .. makes sense
