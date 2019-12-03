@@ -5,36 +5,26 @@ date: "11/26/2019"
 output: html_document
 ---
 
+# Setup
 
+Import required packages
 ```{r setup, message = FALSE, warning = FALSE}
 library(raster) # processing raster data
 library(tidyverse) # data manipulation and visualization
-library(broom)
-library(lubridate)
-library(furrr)
+library(broom) # tidying PC objects
+library(lubridate) # working with dates
+library(furrr) # parallel processing
 plan(multisession)
-library(gganimate)
+library(gganimate) # animations
 ```
-
 
 Define a study area to constrain all computaitons.
 ```{r}
 bbox_wus <- extent(c(-125, -100, 33, 50))
-bbox_co <- extent(c(-110, -105, 40, 45))
+bbox_co <- extent(c(-115, -104, 35, 45))
 ```
 
-
-```{r}
-prism_ref <- list.files('~/Downloads/PRISM/PRISM_ppt_stable_4kmM3_198101_201904_bil', 
-                    pattern = '*.bil$',
-                    full.names = TRUE) %>%
-  .[[1]] %>%
-  raster() %>%
-  crop(bbox_wus) %>%
-  projectRaster(crs = '+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0') %>%
-  crop(bbox_co)
-```
-
+## PRISM Import
 
 ```{r, warning = FALSE}
 prism <- list.files('~/Downloads/PRISM/PRISM_ppt_stable_4kmM3_198101_201904_bil', 
@@ -47,92 +37,101 @@ prism <- list.files('~/Downloads/PRISM/PRISM_ppt_stable_4kmM3_198101_201904_bil'
   crop(bbox_co) %>%
   aggregate(fact = 3) %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  # parse time data
   mutate(time = str_split(layer, pattern = '_'),
          time = map_chr(time, ~.[5]),
          time = parse_date(time, format = '%Y%m')) %>%
   mutate_at(vars(time), funs(year, month)) %>%
+  # calculate water years
   mutate(water_year = if_else(month < 10, year, year + 1L)) %>%
+  # get winter months
   filter(month %in% c(1, 2, 3, 11, 12)) %>%
   select(-layer) %>%
   rename(precip = value) %>%
+  # remove water years for which we don't have all the months
   group_by(x, y, water_year) %>%
   add_tally() %>%
   filter(n == 5) %>%
+  # calculate total winter precip
   summarise(precip = sum(precip)) %>%
-  mutate(avg = mean(precip),
-         anomaly = precip - avg)
+  ungroup()
 ```
 
-```{r}
-prism %>%
+```{r, echo = FALSE}
+a <- prism %>%
   ggplot(aes(x, y)) +
   geom_raster(aes(fill = precip)) +
   scale_fill_viridis_c() +
   transition_states(water_year) +
   coord_quickmap() +
   theme_void()
-```
 
-```{r}
-prism %>%
+b <- prism %>%
+  group_by(x, y) %>%
+  mutate(anomaly = precip - mean(precip)) %>%
   ggplot(aes(x, y)) +
   geom_raster(aes(fill = anomaly)) +
   scale_fill_distiller(palette = 'RdBu') +
   transition_states(water_year) +
   coord_quickmap() +
   theme_void()
+
+a;b
 ```
 
+
+## ERA Import
 
 ```{r}
 ncdf_file <- 'data/adaptor.mars.internal-1566933160.7965047-18657-23-b3ae7b43-15db-4890-bc5b-4d3413fe4ddd.nc'
-ref <- brick(ncdf_file, var = 'sd') %>% 
-  .[[1]]%>%
-  rotate %>%
-  crop(bbox_wus)
-```
 
-```{r}
-elev <- raster('~/gdrive/Data/SRTM_1km.tif') %>%
-  crop(bbox_wus) %>%
-  resample(prism_ref) %>%
-  crop(bbox_co)
-```
-
-
-```{r}
 era <- brick(ncdf_file, var = 'tp') %>% 
   rotate %>%
-  crop(bbox_wus)
-```
-
-```{r}
-era_dat <- era %>%
+  crop(bbox_wus) %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  # parse the time data
   mutate(time = parse_date(str_sub(Z, 1), format = '%Y-%m-%d')) %>%
   mutate_at(vars(time), funs(year, month)) %>%
+  # calculate water years
   mutate(water_year = if_else(month < 10, year, year + 1L)) %>%
+  # get winter months
   filter(month %in% c(1, 2, 3, 11, 12)) %>%
   rename(precip = value) %>%
+  # remove water years for which we don't have all the months
   group_by(x, y, water_year) %>%
   add_tally() %>%
   filter(n == 5) %>%
+  # calculate total winter precip
   summarise(precip = sum(precip)) %>%
   ungroup()
 ```
 
-```{r}
-era_dat %>%
+```{r, echo = FALSE}
+a <- era %>%
   ggplot(aes(x, y)) +
   geom_raster(aes(fill = precip)) +
-  facet_wrap(~water_year) +
   scale_fill_viridis_c() +
-  coord_quickmap()
+  transition_states(water_year) +
+  coord_quickmap() +
+  theme_void()
+
+b <- era %>%
+  group_by(x, y) %>% 
+  mutate(anomaly = precip - mean(precip)) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = anomaly)) +
+  scale_fill_distiller(palette = 'RdBu') +
+  transition_states(water_year) +
+  coord_quickmap() +
+  theme_void()
+
+a;b
 ```
 
+# EOF Analysis
 
 ```{r}
-era_pca <- era_dat %>%
+era_pca <- era %>%
   spread(water_year, precip) %>%
   select(-x, -y) %>%
   t() %>%
@@ -181,7 +180,7 @@ tidy(era_pca) %>%
 ```
 
 ```{r, echo = FALSE}
-era_dat %>%
+era %>%
   spread(water_year, precip) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
@@ -295,27 +294,27 @@ t3 <- cancor(t1, t2, xcenter = FALSE, ycenter = FALSE) # pcs already centered
 ```
 
 ```{r}
-t5 <- eofs_era %>%
+t4 <- eofs_era %>%
   spread(PC, eof) %>%
   select(-column) %>%
   as.matrix() %>%
-  `%*%`(t4$ycoef) %>%
+  `%*%`(t3$ycoef) %>%
   as_tibble()
   
-t6 <- eofs_prism %>%
+t5 <- eofs_prism %>%
   spread(PC, eof) %>%
   select(-column) %>%
   as.matrix() %>%
-  `%*%`(t4$xcoef) %>%
+  `%*%`(t3$xcoef) %>%
   as_tibble()
 ```
 
 ```{r}
-era_dat %>%
+era %>%
   spread(water_year, precip) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
-  bind_cols(t5) %>%
+  bind_cols(t4) %>%
   gather(pattern, value, V1:V4) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = value)) +
@@ -329,12 +328,10 @@ era_dat %>%
 
 ```{r}
 prism %>%
-  ungroup %>%
-  select(-avg, -anomaly) %>%
   spread(water_year, precip) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
-  bind_cols(t6) %>%
+  bind_cols(t5) %>%
   gather(pattern, value, V1:V4) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = value)) +
@@ -446,7 +443,7 @@ prism_rast <- prism %>%
   spread(water_year, precip) %>%
   rasterFromXYZ()
 
-era_rast <- era_dat %>%
+era_rast <- era %>%
   filter(water_year >= 1982) %>%
   spread(water_year, precip) %>%
   rasterFromXYZ()
