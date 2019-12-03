@@ -9,6 +9,11 @@ output: html_document
 ```{r setup, message = FALSE, warning = FALSE}
 library(raster) # processing raster data
 library(tidyverse) # data manipulation and visualization
+library(broom)
+library(lubridate)
+library(furrr)
+plan(multisession)
+library(gganimate)
 ```
 
 
@@ -18,10 +23,18 @@ bbox_wus <- extent(c(-125, -100, 33, 50))
 bbox_co <- extent(c(-110, -105, 40, 45))
 ```
 
+
 ```{r}
-library(furrr)
-plan(multisession)
+prism_ref <- list.files('~/Downloads/PRISM/PRISM_ppt_stable_4kmM3_198101_201904_bil', 
+                    pattern = '*.bil$',
+                    full.names = TRUE) %>%
+  .[[1]] %>%
+  raster() %>%
+  crop(bbox_wus) %>%
+  projectRaster(crs = '+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0') %>%
+  crop(bbox_co)
 ```
+
 
 ```{r, warning = FALSE}
 prism <- list.files('~/Downloads/PRISM/PRISM_ppt_stable_4kmM3_198101_201904_bil', 
@@ -32,9 +45,42 @@ prism <- list.files('~/Downloads/PRISM/PRISM_ppt_stable_4kmM3_198101_201904_bil'
   brick() %>%
   projectRaster(crs = '+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0') %>%
   crop(bbox_co) %>%
-  aggregate(fact = 3)
+  aggregate(fact = 3) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(time = str_split(layer, pattern = '_'),
+         time = map_chr(time, ~.[5]),
+         time = parse_date(time, format = '%Y%m')) %>%
+  mutate_at(vars(time), funs(year, month)) %>%
+  mutate(water_year = if_else(month < 10, year, year + 1L)) %>%
+  filter(month %in% c(1, 2, 3, 11, 12)) %>%
+  select(-layer) %>%
+  rename(precip = value) %>%
+  group_by(x, y, water_year) %>%
+  add_tally() %>%
+  filter(n == 5) %>%
+  summarise(precip = sum(precip)) %>%
+  mutate(avg = mean(precip),
+         anomaly = precip - avg)
+```
 
-plot(prism)
+```{r}
+prism %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = precip)) +
+  scale_fill_viridis_c() +
+  transition_states(water_year) +
+  coord_quickmap() +
+  theme_void()
+```
+
+```{r}
+prism %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = anomaly)) +
+  scale_fill_distiller(palette = 'RdBu') +
+  transition_states(water_year) +
+  coord_quickmap() +
+  theme_void()
 ```
 
 
@@ -49,7 +95,7 @@ ref <- brick(ncdf_file, var = 'sd') %>%
 ```{r}
 elev <- raster('~/gdrive/Data/SRTM_1km.tif') %>%
   crop(bbox_wus) %>%
-  resample(prism) %>%
+  resample(prism_ref) %>%
   crop(bbox_co)
 ```
 
@@ -60,10 +106,34 @@ era <- brick(ncdf_file, var = 'tp') %>%
   crop(bbox_wus)
 ```
 
+```{r}
+era_dat <- era %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(time = parse_date(str_sub(Z, 1), format = '%Y-%m-%d')) %>%
+  mutate_at(vars(time), funs(year, month)) %>%
+  mutate(water_year = if_else(month < 10, year, year + 1L)) %>%
+  filter(month %in% c(1, 2, 3, 11, 12)) %>%
+  rename(precip = value) %>%
+  group_by(x, y, water_year) %>%
+  add_tally() %>%
+  filter(n == 5) %>%
+  summarise(precip = sum(precip)) %>%
+  ungroup()
+```
 
 ```{r}
-era_pca <- era %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
+era_dat %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = precip)) +
+  facet_wrap(~water_year) +
+  scale_fill_viridis_c() +
+  coord_quickmap()
+```
+
+
+```{r}
+era_pca <- era_dat %>%
+  spread(water_year, precip) %>%
   select(-x, -y) %>%
   t() %>%
   prcomp(scale. = TRUE)
@@ -88,15 +158,13 @@ ggplot(aes(x = PC, y = percent * 100)) +
   guides(color = F) + 
   scale_x_continuous(breaks = seq(0, 12, 2))
 ```
-```{r}
-library(broom)
-```
+
 
 
 ```{r calc_eofs}
 eofs_era <- era_pca %>% # calculate unrotated EOFs
   broom::tidy(matrix = 'variables') %>%
-  filter(PC <= 6) %>%
+  filter(PC <= 4) %>%
   left_join(era_eigs[1:2], by = 'PC') %>%
   mutate(eof = value * std.dev,
          PC = as.character(PC)) %>%
@@ -105,20 +173,17 @@ eofs_era <- era_pca %>% # calculate unrotated EOFs
 
 ```{r}
 tidy(era_pca) %>%
-  mutate(time = parse_date(str_sub(row, 2), format = '%Y.%m.%d')) %>%
-  filter(PC <=6) %>%
+  mutate(time = as.numeric(as.character(row))) %>%
+  filter(PC <=4) %>%
   ggplot(aes(time, value)) +
   geom_line() +
   facet_wrap(~PC)
 ```
 
-
-
-
 ```{r, echo = FALSE}
-era %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
-  mutate(column = as.character(1:n())) %>%
+era_dat %>%
+  spread(water_year, precip) %>%
+  mutate(column = 1:n()) %>%
   select(x, y, column) %>%
   full_join(eofs_era) %>%
   ggplot() +
@@ -128,32 +193,172 @@ era %>%
   scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
   theme_void()+
   coord_quickmap() +
-  ggtitle('Simulated Precipitation EOFs')
+  ggtitle('Reanalysis Precipitation EOFs')
 ```
 
 ```{r}
-pcs <- tidy(era_pca) %>%
-  mutate(time = parse_date(str_sub(row, 2), format = '%Y.%m.%d')) %>%
-  filter(PC <=6) %>%
+pcs_era <- tidy(era_pca) %>%
+  mutate(water_year = as.numeric(as.character(row))) %>%
+  filter(PC <= 4) %>%
   mutate(PC = paste0('PC', PC)) %>%
   spread(PC, value)
 ```
 
 
 ```{r}
+prism_pca <- prism %>%
+  ungroup %>%
+  select(x:precip) %>%
+  spread(water_year, precip) %>%
+  select(-x, -y,) %>%
+  t() %>%
+  prcomp(scale. = TRUE)
+```
+
+```{r, echo = FALSE}
+prism_eigs <- prism_pca %>%
+  broom::tidy(matrix = 'pcs') %>%
+  mutate(eigenvalues = std.dev ^ 2)
+```
+
+```{r plot_variance_sim, fig.width = 5, fig.height = 4, echo = FALSE}
+prism_eigs %>% 
+    filter(PC <= 12) %>%
+ggplot(aes(x = PC, y = percent * 100)) +
+  #geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
+  geom_point(size = 2) + 
+ # geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
+  labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
+  geom_vline(xintercept = 4.5, linetype = 2, color = 'red', alpha = .7) +
+  theme_bw() + 
+  guides(color = F) + 
+  scale_x_continuous(breaks = seq(0, 12, 2))
+```
+
+
+
+```{r calc_eofs}
+eofs_prism <- prism_pca %>% # calculate unrotated EOFs
+  broom::tidy(matrix = 'variables') %>%
+  filter(PC <= 4) %>%
+  left_join(prism_eigs[1:2], by = 'PC') %>%
+  mutate(eof = value * std.dev,
+         PC = as.character(PC)) %>%
+  select(-std.dev,-value) 
+```
+
+```{r}
+tidy(prism_pca) %>%
+  mutate(time = as.numeric(as.character(row))) %>%
+  filter(PC <=4) %>%
+  ggplot(aes(time, value)) +
+  geom_line() +
+  facet_wrap(~PC)
+```
+
+```{r, echo = FALSE}
+prism %>%
+  ungroup() %>%
+  select(x:precip) %>%
+  spread(water_year, precip) %>%
+  mutate(column = 1:n()) %>%
+  select(x, y, column) %>%
+  full_join(eofs_prism) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = eof)) +
+  #geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~PC) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  theme_void()+
+  coord_quickmap() +
+  ggtitle('Observed Precipitation EOFs')
+```
+
+```{r}
+pcs_prism <- tidy(prism_pca) %>%
+  mutate(water_year = as.numeric(as.character(row))) %>%
+  filter(PC <= 4) %>%
+  mutate(PC = paste0('PC', PC)) %>%
+  spread(PC, value)
+```
+
+```{r}
+t1 <- pcs_prism %>%
+  select(PC1:PC4) %>%
+  as.matrix()
+t2 <- pcs_era %>%
+    filter(water_year >= 1982) %>%
+  select(PC1:PC4) %>%
+  as.matrix()
+
+t3 <- cancor(t1, t2, xcenter = FALSE, ycenter = FALSE) # pcs already centered
+```
+
+```{r}
+t5 <- eofs_era %>%
+  spread(PC, eof) %>%
+  select(-column) %>%
+  as.matrix() %>%
+  `%*%`(t4$ycoef) %>%
+  as_tibble()
+  
+t6 <- eofs_prism %>%
+  spread(PC, eof) %>%
+  select(-column) %>%
+  as.matrix() %>%
+  `%*%`(t4$xcoef) %>%
+  as_tibble()
+```
+
+```{r}
+era_dat %>%
+  spread(water_year, precip) %>%
+  mutate(column = 1:n()) %>%
+  select(x, y, column) %>%
+  bind_cols(t5) %>%
+  gather(pattern, value, V1:V4) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+  #geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~pattern) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-.01, .01)) +
+  theme_void()+
+  coord_quickmap() +
+  ggtitle('Reanalysis CCA')
+```
+
+```{r}
+prism %>%
+  ungroup %>%
+  select(-avg, -anomaly) %>%
+  spread(water_year, precip) %>%
+  mutate(column = 1:n()) %>%
+  select(x, y, column) %>%
+  bind_cols(t6) %>%
+  gather(pattern, value, V1:V4) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+  #geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~pattern) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-.01, .01)) +
+  theme_void()+
+  coord_quickmap() +
+  ggtitle('Observed CCA')
+```
+
+## other
+```{r}
 test <- prism %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
-  mutate(time = str_split(layer, pattern = '_'),
-         time = map_chr(time, ~.[5])) %>%
-  mutate(time = parse_date(time, format = '%Y%m')) %>%
-  select(-layer) %>%
-  left_join(pcs) 
+  ungroup() %>%
+  left_join(pcs) %>%
+  left_join(as.data.frame(elev, xy = TRUE, na.rm = TRUE)) %>%
+  rename(elev = SRTM_1km)
 ```
 
 ```{r}
 library(mgcv)
 
-mod1 <- bam(value ~ te(x, y, by = PC1) + te(x, y, by = PC2) + te(x, y, by = PC3) + te(x, y, by = PC4) + PC1 + PC2 + PC3 + PC4, data = test)
+mod1 <- bam(precip ~ te(x, y, by = PC1, k = 20) + s(water_year) + PC1, data = test)
 
 summary(mod1)
 
@@ -161,22 +366,36 @@ plot(mod1, scheme = 2)
 
 test %>%
   mutate(pred = predict(mod1, .),
-         res = pred - value) %>%
-  filter(time < as.Date('1982-01-01')) %>%
+         res = pred - precip) %>%
+  ggplot(aes(x, y, fill = pred)) +
+  geom_raster() +
+  coord_quickmap() +
+  facet_wrap(~water_year)
+```
+
+```{r}
+mod2 <- bam(precip ~  s(PC1) + s(PC2) + s(PC3) + s(PC4)+ te(x, y) + s(elev) + s(water_year), data = test, select = TRUE)
+
+summary(mod2)
+
+plot(mod2, scheme = 2)
+
+test %>%
+  mutate(pred = predict(mod2, .),
+         res = pred - precip) %>%
   ggplot(aes(x, y, fill = res)) +
   geom_raster() +
   coord_quickmap() +
-  facet_wrap(~time)
+  facet_wrap(~water_year)
 ```
-
 ok so the one-off regressions are missing the mountains! an obvious suggestion is that the bandwidth on the tensor splines is too large so it can't resoluve those 
 
 ```{r}
 test2 <- test %>%
   group_by(x,y) %>%
   nest %>%
-  mutate(mod = future_map(data, ~lm(value ~ PC1 + PC2 + PC3 + PC4, data = .), .progress = TRUE),
-         pred = future_map(mod, ~predict)) %>%
+  mutate(mod = future_map(data, ~lm(precip ~ PC1, data = .), .progress = TRUE),
+         pred = future_map(mod, ~predict(.))) %>%
   select(-mod) %>%
   unnest
 ```
