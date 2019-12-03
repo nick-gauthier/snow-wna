@@ -440,7 +440,24 @@ library(remote)
 ```
 
 ```{r}
-test <- eot(precip_coarse, precip, n = 6, type = 'rsq')
+prism_rast <- prism %>%
+  ungroup %>%
+  select(-avg, -anomaly) %>%
+  spread(water_year, precip) %>%
+  rasterFromXYZ()
+
+era_rast <- era_dat %>%
+  filter(water_year >= 1982) %>%
+  spread(water_year, precip) %>%
+  rasterFromXYZ()
+
+
+plot(era_rast)
+```
+
+
+```{r}
+test <- eot(era_rast, prism_rast, n = 6, type = 'rsq')
 ```
 
 ```{r}
@@ -453,6 +470,16 @@ plot(test, y = 6)
 ```
 
 ```{r}
-cesm_h2osno
+test2 <- eot(anomalize(era_rast), anomalize(prism_rast), n = 6, type = 'rsq')
 ```
 
+```{r}
+plot(test2, y = 1)
+plot(test2, y = 2)
+plot(test2, y = 3)
+plot(test2, y = 4)
+plot(test2, y = 5)
+plot(test2, y = 6)
+```
+
+so anomalizing the rasters doesn't change teh spatial patterns, just the percent variance explained .. makes sense
