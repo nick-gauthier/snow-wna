@@ -12,8 +12,8 @@ Import required packages
 library(raster) # processing raster data
 library(tidyverse) # data manipulation and visualization
 library(broom) # tidying PC objects
-library(lubridate) # working with dates
 library(furrr) # parallel processing
+library(lubridate) # processing dates
 plan(multisession)
 library(gganimate) # animations
 library(remote) # EOT analysis
@@ -81,17 +81,14 @@ a;b
 ```
 
 
-## ERA Import
+## CERA Import
 
 ```{r}
-ncdf_file <- 'data/adaptor.mars.internal-1566933160.7965047-18657-23-b3ae7b43-15db-4890-bc5b-4d3413fe4ddd.nc'
-
-era <- brick(ncdf_file, var = 'tp') %>% 
-  rotate %>%
-  crop(bbox_wus) %>%
+cera <- brick('data/CERA-20C_precipitation.nc') %>%
+  crop(bbox_wus, snap = 'out') %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
   # parse the time data
-  mutate(time = parse_date(str_sub(Z, 1), format = '%Y-%m-%d')) %>%
+  mutate(time = parse_datetime(Z)) %>%
   mutate_at(vars(time), funs(year, month)) %>%
   # calculate water years
   mutate(water_year = if_else(month < 10, year, year + 1L)) %>%
@@ -108,7 +105,7 @@ era <- brick(ncdf_file, var = 'tp') %>%
 ```
 
 ```{r, echo = FALSE}
-a <- era %>%
+a <- cera %>%
   ggplot(aes(x, y)) +
   geom_raster(aes(fill = precip)) +
   scale_fill_viridis_c() +
@@ -116,7 +113,7 @@ a <- era %>%
   coord_quickmap() +
   theme_void()
 
-b <- era %>%
+b <- cera %>%
   group_by(x, y) %>% 
   mutate(anomaly = precip - mean(precip)) %>%
   ggplot(aes(x, y)) +
@@ -131,9 +128,9 @@ a;b
 
 # EOF Analysis
 
-## ERA 
+## CERA 
 ```{r}
-era_pca <- era %>%
+cera_pca <- cera %>%
   spread(water_year, precip) %>%
   select(-x, -y) %>%
   t() %>%
@@ -141,13 +138,13 @@ era_pca <- era %>%
 ```
 
 ```{r, echo = FALSE}
-era_eigs <- era_pca %>%
+cera_eigs <- cera_pca %>%
   broom::tidy(matrix = 'pcs') %>%
   mutate(eigenvalues = std.dev ^ 2)
 ```
 
 ```{r plot_variance_sim, fig.width = 5, fig.height = 4, echo = FALSE}
-era_eigs %>% 
+cera_eigs %>% 
     filter(PC <= 12) %>%
 ggplot(aes(x = PC, y = percent * 100)) +
   #geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
@@ -163,17 +160,17 @@ ggplot(aes(x = PC, y = percent * 100)) +
 
 
 ```{r calc_eofs}
-eofs_era <- era_pca %>% # calculate unrotated EOFs
+eofs_cera <- cera_pca %>% # calculate unrotated EOFs
   broom::tidy(matrix = 'variables') %>%
   filter(PC <= 4) %>%
-  left_join(era_eigs[1:2], by = 'PC') %>%
+  left_join(cera_eigs[1:2], by = 'PC') %>%
   mutate(eof = value * std.dev,
          PC = as.character(PC)) %>%
   select(-std.dev,-value) 
 ```
 
 ```{r}
-tidy(era_pca) %>%
+tidy(cera_pca) %>%
   mutate(time = as.numeric(as.character(row))) %>%
   filter(PC <=4) %>%
   ggplot(aes(time, value)) +
@@ -182,11 +179,11 @@ tidy(era_pca) %>%
 ```
 
 ```{r, echo = FALSE}
-era %>%
+cera %>%
   spread(water_year, precip) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
-  full_join(eofs_era) %>%
+  full_join(eofs_cera) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = eof)) +
   #geom_sf(data = states_wus, fill = NA, color = 'black') +
@@ -198,7 +195,7 @@ era %>%
 ```
 
 ```{r}
-pcs_era <- tidy(era_pca) %>%
+pcs_cera <- tidy(cera_pca) %>%
   mutate(water_year = as.numeric(as.character(row))) %>%
   filter(PC <= 4) %>%
   mutate(PC = paste0('PC', PC)) %>%
@@ -286,9 +283,10 @@ pcs_prism <- tidy(prism_pca) %>%
 # CCA Analysis
 ```{r}
 t1 <- pcs_prism %>%
+  filter(water_year <= 2010) %>%
   select(PC1:PC4) %>%
   as.matrix()
-t2 <- pcs_era %>%
+t2 <- pcs_cera %>%
     filter(water_year >= 1982) %>%
   select(PC1:PC4) %>%
   as.matrix()
@@ -297,7 +295,7 @@ t3 <- cancor(t1, t2, xcenter = FALSE, ycenter = FALSE) # pcs already centered
 ```
 
 ```{r}
-t4 <- eofs_era %>%
+t4 <- eofs_cera %>%
   spread(PC, eof) %>%
   select(-column) %>%
   as.matrix() %>%
@@ -313,7 +311,7 @@ t5 <- eofs_prism %>%
 ```
 
 ```{r}
-era %>%
+cera %>%
   spread(water_year, precip) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
@@ -323,7 +321,7 @@ era %>%
   geom_raster(aes(x, y, fill = value)) +
   #geom_sf(data = states_wus, fill = NA, color = 'black') +
   facet_wrap(~pattern) +
-  scale_fill_distiller(palette = 'RdBu', limits = c(-.01, .01)) +
+  scale_fill_distiller(palette = 'RdBu') +
   theme_void()+
   coord_quickmap() +
   ggtitle('Reanalysis CCA')
@@ -350,10 +348,11 @@ prism %>%
 
 ```{r}
 prism_rast <- prism %>%
+  filter(water_year <= 2010) %>%
   spread(water_year, precip) %>%
   rasterFromXYZ()
 
-era_rast <- era %>%
+cera_rast <- cera %>%
   filter(water_year >= 1982) %>%
   spread(water_year, precip) %>%
   rasterFromXYZ()
@@ -361,7 +360,7 @@ era_rast <- era %>%
 
 
 ```{r}
-test_eot <- eot(era_rast, prism_rast, n = 6, type = 'rsq')
+test_eot <- eot(cera_rast, prism_rast, n = 4, type = 'rsq')
 ```
 
 ```{r}
@@ -369,12 +368,10 @@ plot(test_eot, y = 1)
 plot(test_eot, y = 2)
 plot(test_eot, y = 3)
 plot(test_eot, y = 4)
-plot(test_eot, y = 5)
-plot(test_eot, y = 6)
 ```
 
 ```{r}
-test2 <- eot(anomalize(era_rast), anomalize(prism_rast), n = 6, type = 'rsq')
+test2 <- eot(anomalize(cera_rast), anomalize(prism_rast), n = 4, type = 'rsq')
 ```
 
 ```{r}
@@ -382,8 +379,6 @@ plot(test2, y = 1)
 plot(test2, y = 2)
 plot(test2, y = 3)
 plot(test2, y = 4)
-plot(test2, y = 5)
-plot(test2, y = 6)
 ```
 
 so anomalizing the rasters doesn't change the spatial patterns, just the percent variance explained .. makes sense
