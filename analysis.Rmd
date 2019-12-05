@@ -60,44 +60,28 @@ preprocess <- function(x, var, flip = FALSE, regrid = FALSE, monthly = FALSE) {
 ```
 
 ```{r}
+preprocess_prism <- function(x, var = 'SWE'){
+  maps <- brick(x, varname = var)
 
-test_preprocess <- function(x){
-t1 <- x %>%
-  brick %>%
-  getZ %>%
-  str_detect('-03-') %>%
-  which
-
-list.files('data', pattern = 'SWE_Depth', full.names = TRUE)[1] %>%
-  brick %>%
-  subset(t1) %>% 
-  crop(bbox) %>%
-    mean %>%
-  aggregate(fact = 2, na.rm = TRUE)
+  indices <- getZ(maps) %>% # find the index for April 1st
+    str_detect('-03-') %>%
+    which()
+  
+  subset(maps, indices) %>%
+    crop(bbox) %>%
+    mean() %>%
+    aggregate(fact = 2, na.rm = TRUE) # resample to lower res to speed up analysis
 }
 ```
 
 
 ```{r message=FALSE,warning=FALSE}
-plan(multisession) # setup parallel processing
-
+plan(multisession)
 # import SWE data
 swe_obs <- list.files('data', pattern = 'SWE_Depth', full.names = TRUE) %>%
-  future_map(preprocess, var = 'SWE', regrid = TRUE) %>%
-  brick()
-
-# import depth data
-depth_obs <- list.files('data', pattern = 'SWE_Depth', full.names = TRUE) %>%
-  future_map(preprocess, var = 'DEPTH', regrid = TRUE) %>%
-  brick()
-```
-
-Import SRTM elevation and resample to the resolution of the observations. Also calculate the area of each grid cell.
-```{r}
-elev <- raster('~/gdrive/Data/SRTM_1km.tif') %>%
-  crop(bbox) %>%
-  resample(swe_obs) %>%
-  brick(., area(.))
+  future_map(preprocess_prism, var = 'SWE') %>%
+  brick() %>%
+  setNames(1982:2017)
 ```
 
 Turn all the rasters into data frames and join.
@@ -107,20 +91,6 @@ swe_dat <- swe_obs %>%
   mutate(year = round(parse_number(layer))) %>%
   rename(SWE = value) %>%
   select(-layer)
-
-depth_dat <- depth_obs %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
-  mutate(year = round(parse_number(layer))) %>%
-  rename(DEPTH = value) %>%
-  select(-layer)
-
-elev_dat <- elev %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
-  rename(elev = SRTM_1km, area = layer)
-
-snow_dat <- swe_dat %>%
-  left_join(depth_dat, by = c('x', 'y', 'year')) %>%
-  left_join(elev_dat, by = c('x', 'y'))
 ```
 
 ```{r, echo = FALSE}
@@ -186,9 +156,6 @@ snow_dat %>%
   mutate(mod = future_map(data, ~lm(SWE ~ year, data = .), .progress = TRUE))
 ```
 
-```{r}
-
-```
 
 
 What about total area covered?
@@ -444,7 +411,7 @@ livneh_dat <- livneh %>%
   mutate(year = round(parse_number(layer))) %>%
   filter(between(year, 1920, 2010)) %>%
   rename(SWE = value) %>%
-  dplyr::select(-layer)
+  select(-layer)
 ```
 
 
@@ -477,9 +444,9 @@ livneh_pca <- livneh_dat %>%
   mutate(test = all(SWE == 0)) %>%
   filter(test == FALSE) %>%
   ungroup() %>%
-  dplyr::select(-test)%>%
+  select(-test)%>%
   spread(year, SWE) %>%
-  dplyr::select(-x, -y) %>%
+  select(-x, -y) %>%
   t() %>%
   prcomp(scale. = TRUE)
 ```
@@ -597,7 +564,7 @@ eofs_obs <- obs_pca %>% # calculate unrotated EOFs
   left_join(obs_eigs[1:2], by = 'PC') %>%
   mutate(eof = value * std.dev,
          PC = as.character(PC)) %>%
-  dplyr::select(-std.dev,-value) 
+  select(-std.dev,-value) 
 
 eofs_sim <- sim_pca %>% # calculate unrotated EOFs
   tidy(matrix = 'variables') %>%
@@ -605,7 +572,7 @@ eofs_sim <- sim_pca %>% # calculate unrotated EOFs
   left_join(sim_eigs[1:2], by = 'PC') %>%
   mutate(eof = value * std.dev,
          PC = as.character(PC)) %>%
-  dplyr::select(-std.dev,-value) 
+  select(-std.dev,-value) 
 
 eofs_livneh <- livneh_pca %>% # calculate unrotated EOFs
   tidy(matrix = 'variables') %>%
@@ -613,7 +580,7 @@ eofs_livneh <- livneh_pca %>% # calculate unrotated EOFs
   left_join(livneh_eigs[1:2], by = 'PC') %>%
   mutate(eof = value * std.dev,
          PC = as.character(PC)) %>%
-  dplyr::select(-std.dev,-value) 
+  select(-std.dev,-value) 
 ```
 
 
@@ -623,10 +590,10 @@ swe_dat %>%
   mutate(test = all(SWE== 0)) %>%
   filter(test == FALSE) %>%
   ungroup() %>%
-  dplyr::select(-test) %>%
+  select(-test) %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
-  dplyr::select(x, y, column) %>%
+  select(x, y, column) %>%
   full_join(eofs_obs) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = eof)) +
@@ -643,10 +610,10 @@ livneh_dat%>%
   mutate(test = all(SWE== 0)) %>%
   filter(test == FALSE) %>%
   ungroup() %>%
-  dplyr::select(-test) %>%
+  select(-test) %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
-  dplyr::select(x, y, column) %>%
+  select(x, y, column) %>%
   full_join(eofs_livneh) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = eof)) +
@@ -664,10 +631,10 @@ ccsm_dat %>%
   mutate(test = all(SWE== 0)) %>%
   filter(test == FALSE) %>%
   ungroup() %>%
-  dplyr::select(-test) %>%
+  select(-test) %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
-  dplyr::select(x, y, column) %>%
+  select(x, y, column) %>%
   full_join(eofs_sim) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = eof)) +
@@ -690,7 +657,7 @@ cera_dat <- cera %>%
   mutate(year = round(parse_number(layer))) %>%
   filter(between(year, 1920, 2010)) %>%
   rename(SWE = value) %>%
-  dplyr::select(-layer)
+  select(-layer)
 ```
 
 
@@ -700,9 +667,9 @@ cera_pca <- cera_dat %>%
   mutate(test = all(SWE == 0)) %>%
   filter(test == FALSE) %>%
   ungroup() %>%
-  dplyr::select(-test)%>%
+  select(-test)%>%
   spread(year, SWE) %>%
-  dplyr::select(-x, -y) %>%
+  select(-x, -y) %>%
   t() %>%
   prcomp(scale. = TRUE)
 ```
@@ -744,7 +711,7 @@ eofs_cera <- cera_pca %>% # calculate unrotated EOFs
   left_join(cera_eigs[1:2], by = 'PC') %>%
   mutate(eof = value * std.dev,
          PC = as.character(PC)) %>%
-  dplyr::select(-std.dev,-value) 
+  select(-std.dev,-value) 
 ```
 
 
@@ -754,10 +721,10 @@ cera_dat %>%
   mutate(test = all(SWE== 0)) %>%
   filter(test == FALSE) %>%
   ungroup() %>%
-  dplyr::select(-test) %>%
+  select(-test) %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
-  dplyr::select(x, y, column) %>%
+  select(x, y, column) %>%
   full_join(eofs_cera) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = eof)) +
@@ -817,11 +784,11 @@ ggplot(aes(water_year, value)) +
 
 ```{r}
 t1 <- pcs_obs %>%
-  dplyr::select(PC1:PC9) %>%
+  select(PC1:PC9) %>%
   as.matrix() %>%
   scale()
 t2 <- pcs_cera %>%
-  dplyr::select(PC1:PC9) %>%
+  select(PC1:PC9) %>%
   as.matrix() %>%
   scale()
 
@@ -831,14 +798,14 @@ t3 <- cancor(t1, t2, xcenter = FALSE, ycenter = FALSE) # pcs already centered
 ```{r}
 t4 <- eofs_cera %>%
   spread(PC, eof) %>%
-  dplyr::select(-column) %>%
+  select(-column) %>%
   as.matrix() %>%
   `%*%`(t3$ycoef) %>%
   as_tibble()
   
 t5 <- eofs_obs %>%
   spread(PC, eof) %>%
-  dplyr::select(-column) %>%
+  select(-column) %>%
   as.matrix() %>%
   `%*%`(t3$xcoef) %>%
   as_tibble()
@@ -850,10 +817,10 @@ cera_dat %>%
   mutate(test = all(SWE== 0)) %>%
   filter(test == FALSE) %>%
   ungroup() %>%
-  dplyr::select(-test) %>%
+  select(-test) %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
-  dplyr::select(x, y, column) %>%
+  select(x, y, column) %>%
   bind_cols(t4) %>%
   gather(pattern, value, V1:V9) %>%
   ggplot() +
@@ -872,10 +839,10 @@ swe_dat %>%
   mutate(test = all(SWE== 0)) %>%
   filter(test == FALSE) %>%
   ungroup() %>%
-  dplyr::select(-test) %>%
+  select(-test) %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
-  dplyr::select(x, y, column) %>%
+  select(x, y, column) %>%
   bind_cols(t5) %>%
   gather(pattern, value, V1:V9) %>%
   ggplot() +
