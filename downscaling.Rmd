@@ -36,7 +36,9 @@ prism <- list.files('~/Downloads/PRISM/PRISM_ppt_stable_4kmM3_198101_201904_bil'
   brick() %>%
   projectRaster(crs = '+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0') %>%
   crop(bbox_co) %>%
-  aggregate(fact = 3) %>%
+  aggregate(fact = 3)
+
+prism_dat <- prism %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
   # parse time data
   mutate(time = str_split(layer, pattern = '_'),
@@ -59,7 +61,7 @@ prism <- list.files('~/Downloads/PRISM/PRISM_ppt_stable_4kmM3_198101_201904_bil'
 ```
 
 ```{r, echo = FALSE}
-a <- prism %>%
+a <- prism_dat %>%
   ggplot(aes(x, y)) +
   geom_raster(aes(fill = precip)) +
   scale_fill_viridis_c() +
@@ -67,7 +69,7 @@ a <- prism %>%
   coord_quickmap() +
   theme_void()
 
-b <- prism %>%
+b <- prism_dat %>%
   group_by(x, y) %>%
   mutate(anomaly = precip - mean(precip)) %>%
   ggplot(aes(x, y)) +
@@ -205,7 +207,7 @@ pcs_cera <- tidy(cera_pca) %>%
 ## PRISM
 
 ```{r}
-prism_pca <- prism %>%
+prism_pca <- prism_dat %>%
   ungroup %>%
   select(x:precip) %>%
   spread(water_year, precip) %>%
@@ -217,16 +219,20 @@ prism_pca <- prism %>%
 ```{r, echo = FALSE}
 prism_eigs <- prism_pca %>%
   broom::tidy(matrix = 'pcs') %>%
-  mutate(eigenvalues = std.dev ^ 2)
+  mutate(eigenvalues = std.dev ^ 2,
+         error = sqrt(2 / n_effective(prism)),
+         low =  eigenvalues * (1 - error) * 100 / sum(eigenvalues),
+         hi = eigenvalues * (1 + error) * 100 / sum(eigenvalues),
+         cumvar_line = hi + 0.02 * max(hi))
 ```
 
 ```{r plot_variance_sim, fig.width = 5, fig.height = 4, echo = FALSE}
 prism_eigs %>% 
     filter(PC <= 12) %>%
 ggplot(aes(x = PC, y = percent * 100)) +
-  #geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
+  geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
   geom_point(size = 2) + 
- # geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
+ geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
   labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
   geom_vline(xintercept = 4.5, linetype = 2, color = 'red', alpha = .7) +
   theme_bw() + 
@@ -254,7 +260,7 @@ tidy(prism_pca) %>%
 ```
 
 ```{r, echo = FALSE}
-prism %>%
+prism_dat %>%
   ungroup() %>%
   select(x:precip) %>%
   spread(water_year, precip) %>%
@@ -328,7 +334,7 @@ cera %>%
 ```
 
 ```{r}
-prism %>%
+prism_dat %>%
   spread(water_year, precip) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
@@ -347,7 +353,7 @@ prism %>%
 # EOT Analysis
 
 ```{r}
-prism_rast <- prism %>%
+prism_rast <- prism_dat %>%
   filter(water_year <= 2010) %>%
   spread(water_year, precip) %>%
   rasterFromXYZ()
