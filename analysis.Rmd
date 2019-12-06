@@ -482,14 +482,62 @@ sim_eigs <- sim_pca %>%
          cumvar_line = hi + 0.02 * max(hi))
 
 nCng(obs_eigs$eigenvalues)
-nCng(livneh_eigs$eigenvalues)
 nCng(sim_eigs$eigenvalues)
+```
+
+```{r}
+test <- obs_eigs$eigenvalues
+
+test[1] / ((1 / 35) * sum(test[1:35]))
+
+scale_lambda <- function(lambdas, rank, nrank){
+  #nrank <- length(lambdas)- 1 # this only applies if obs time points are fewer than spatial points
+  lambdas[rank] / ((1 / (nrank - rank + 1)) * sum(lambdas[rank:nrank]))
+}
+
+scale_lambda(test, 1)
+
+test2 <- c(3.532, 1.985, .344, .074, .038, .027)
+
+scale_lambda(test2, 3, 6)
+
+k <- 1
+K <- 6
+n <- 31
+
+eigen_test <- function(lambdas, k, M, n){
+nrank<- min(n - 1, M)
+
+kstar <- M - k + 1
+nk <- n - k + 1
+mu <- (sqrt(nk - 0.5) + sqrt(kstar - 0.5))^2
+sigma <- sqrt(mu) * (1 / sqrt(nk - 0.5) + 1 / sqrt(kstar - 0.5)) ^ (1/3)
+alpha <- 46.4
+beta <- (0.186 * sigma) / max(nk, kstar)
+zeta <- (mu - 9.85 * sigma) / max(nk, kstar)
+lambda_star <- lambdas[k] / ((1 / (nrank - k + 1)) * sum(lambdas[k:nrank]))
+
+
+ (1- pgamma(((lambda_star - zeta) / beta), 46.4)) < 0.05
+}
+
+
+map_lgl(1:6, ~eigen_test(test2, k = ., M = 6, n = 31))
+
+
+
+dim(pc)
+map_lgl(1:36, ~eigen_test(obs_eigs$eigenvalues, k = ., M = 17783, n = 36))
+
+map_lgl(1:276, ~eigen_test(sim_eigs$eigenvalues, k = ., M = 276, n = 1001))
+
+obs_eigs
 ```
 
 
 ```{r plot_variance_obs, fig.width = 5, fig.height = 4, echo = FALSE}
 obs_eigs %>% 
-    filter(PC <= 20) %>%
+    filter(PC <= 36) %>%
 ggplot(aes(x = PC, y = percent * 100)) +
   geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
   geom_point(size = 2) + 
