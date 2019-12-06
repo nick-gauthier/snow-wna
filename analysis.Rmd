@@ -70,18 +70,28 @@ preprocess_prism <- function(x, var = 'SWE'){
   subset(maps, indices) %>%
     crop(bbox) %>%
     mean() %>%
-    aggregate(fact = 2, na.rm = TRUE) # resample to lower res to speed up analysis
+    aggregate(fact = 3, na.rm = TRUE) # resample to lower res to speed up analysis
 }
+```
+
+```{r}
+plan(multisession)
 ```
 
 
 ```{r message=FALSE,warning=FALSE}
-plan(multisession)
 # import SWE data
 swe_obs <- list.files('data', pattern = 'SWE_Depth', full.names = TRUE) %>%
   future_map(preprocess_prism, var = 'SWE') %>%
   brick() %>%
   setNames(1982:2017)
+```
+
+```{r}
+area_obs <- raster::area(swe_obs) %>%
+    as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  select(-layer) %>%
+  rename(area = value)
 ```
 
 Turn all the rasters into data frames and join.
@@ -90,19 +100,11 @@ swe_dat <- swe_obs %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
   mutate(year = round(parse_number(layer))) %>%
   rename(SWE = value) %>%
-  select(-layer)
+  select(-layer) %>%
+  left_join(area_obs)
 ```
 
-```{r, echo = FALSE}
-# not shown, download state boundary files
-state_names <- c('arizona', 'new mexico', 'colorado', 
-                 'california', 'utah', 'nevada', 
-                 'oregon', 'washington', 'idaho',
-                 'wyoming', 'montana')
 
-states_wus <- maps::map('state', regions = state_names, 
-                    fill = TRUE, plot = FALSE) %>% st_as_sf
-```
 
 Look at how SWE has varied over time and space.
 
