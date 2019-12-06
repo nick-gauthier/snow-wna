@@ -107,7 +107,7 @@ area_obs <- raster::area(swe_obs) %>%
 
 Turn all the rasters into data frames and join.
 ```{r}
-swe_dat <- swe_obs %>%
+prism_dat <- swe_obs %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
   mutate(year = round(parse_number(layer))) %>%
   rename(SWE = value) %>%
@@ -120,7 +120,7 @@ swe_dat <- swe_obs %>%
 Look at how SWE has varied over time and space.
 
 ```{r animation, echo = FALSE, warning=FALSE,cache = TRUE}
-swe_dat %>%
+prism_dat %>%
   ggplot() +
   geom_raster(aes(x, y, fill = SWE)) +
   scale_fill_viridis_c() +
@@ -131,7 +131,7 @@ swe_dat %>%
 ```
 
 ```{r, echo = FALSE}
- swe_dat %>%
+ prism_dat %>%
   group_by(x, y) %>%
   mutate(anomaly = SWE - mean(SWE)) %>%
   ggplot(aes(x, y)) +
@@ -144,7 +144,7 @@ swe_dat %>%
 Some aggregate statistics. Is this the right way to aggregate?
 
 ```{r}
-obs_agg <- swe_dat %>%
+obs_agg <- prism_dat %>%
   filter(SWE > 0) %>%
   group_by(year) %>%
   summarise(SWE = sum(SWE * area), # units in megaliters (?)
@@ -362,7 +362,7 @@ Let's compare the observations and simulation directly.
 
 What's the climatic mean April 1st SWE for the observations and simulations?
 ```{r, echo = FALSE, warning = FALSE}
-swe_dat %>%
+prism_dat %>%
   filter(year <= 2005) %>%
   group_by(x, y) %>%
   summarise(SWE = mean(SWE))%>%
@@ -421,7 +421,7 @@ calc_pcs <- function(dat, scale = TRUE){
     ungroup() %>%
     select(-test)%>%
     spread(year, SWE) %>%
-    select(-x, -y, -area) %>%
+    select(-x, -y) %>%
     t() %>%
     prcomp(scale. = scale)
 }
@@ -429,9 +429,13 @@ calc_pcs <- function(dat, scale = TRUE){
 
 
 ```{r}
-obs_pca <- calc_pcs(swe_dat)
+obs_pca <- prism_dat %>%
+  select(-area) %>%
+  calc_pcs()
 
-sim_pca <- calc_pcs(ccsm_dat)
+sim_pca <- ccsm_dat %>% 
+  select(-area) %>% 
+  calc_pcs()
 ```
 
 
@@ -529,37 +533,31 @@ map_lgl(1:276, ~eigen_test(sim_eigs$eigenvalues, k = ., M = 276, n = 1001))
 ```
 
 
-```{r plot_variance_obs, echo = FALSE}
-obs_eigs %>% 
-    mutate(separated = if_else(is.na(lag(low)), TRUE, hi < lag(low)),
+```{r}
+scree_plot <- function(eigs, k){
+  eigs %>% 
+      mutate(separated = if_else(is.na(lag(low)), TRUE, hi < lag(low)),
           multiplet = as.factor(cumsum(separated))) %>%
-    filter(PC <= 24) %>%
+    filter(PC <= 25) %>%
 ggplot(aes(x = PC, y = percent * 100)) +
-  geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
+  geom_linerange(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
   geom_point(size = 2, aes(color = multiplet)) + 
  geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
   labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
-  geom_vline(xintercept = 9 + .5, linetype = 2, color = 'red', alpha = .7) +
+  geom_vline(xintercept = k + .5, linetype = 2, color = 'red', alpha = .7) +
   theme_bw() + 
   guides(color = F) + 
   scale_x_continuous(breaks = seq(0, 25, 5))
+}
+```
+
+```{r plot_variance_obs, echo = FALSE}
+sree_plot(obs_eigs, 9)
 ```
 
 
 ```{r plot_variance_sim}
-sim_eigs %>% 
-     mutate(separated = if_else(is.na(lag(low)), TRUE, hi < lag(low)),
-          multiplet = as.factor(cumsum(separated))) %>%
-    filter(PC <= 25) %>%
-ggplot(aes(x = PC, y = percent * 100)) +
-  geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
-  geom_point(size = 2, aes(color = multiplet)) + 
- geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
-  labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
-  geom_vline(xintercept = 9 + 0.5, linetype = 2, color = 'red', alpha = .7) +
-  theme_bw() + 
-  guides(color = F) + 
-  scale_x_continuous(breaks = seq(0, 20, 2))
+scree_plot(sim_eigs, 9)
 ```
 
 ```{r}
@@ -581,7 +579,8 @@ eofs_sim <- get_eofs(sim_pca, sim_eigs, 9)
 
 
 ```{r, echo = FALSE}
-swe_dat %>%
+eof_plot <- function(dat, eofs){
+  dat %>%
     group_by(x, y) %>%
   mutate(test = all(SWE== 0)) %>%
   filter(test == FALSE) %>%
@@ -590,7 +589,7 @@ swe_dat %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
-  full_join(eofs_obs) %>%
+  full_join(eofs) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = eof)) +
   geom_sf(data = states_wus, fill = NA, color = 'black') +
@@ -598,28 +597,17 @@ swe_dat %>%
   scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
   theme_void()+
   ggtitle('Observed April 1st SWE EOFS')
+}
 ```
 
 
+```{r}
+eof_plot(prism_dat, eofs_obs)
+```
+
 
 ```{r, echo = FALSE}
-ccsm_dat %>%
-  group_by(x, y) %>%
-  mutate(test = all(SWE== 0)) %>%
-  filter(test == FALSE) %>%
-  ungroup() %>%
-  select(-test) %>%
-  spread(year, SWE) %>%
-  mutate(column = 1:n()) %>%
-  select(x, y, column) %>%
-  full_join(eofs_sim) %>%
-  ggplot() +
-  geom_raster(aes(x, y, fill = eof)) +
-  geom_sf(data = states_wus, fill = NA, color = 'black') +
-  facet_wrap(~PC) +
-  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
-  theme_void()+
-  ggtitle('Simulated SWE EOFs')
+eof_plot(ccsm_dat, eofs_sim)
 ```
 
 So they're the same! next do a Canonical Correlation Analysis
@@ -627,73 +615,49 @@ So they're the same! next do a Canonical Correlation Analysis
 ## Canonical Correlation Analysis
 
 ```{r}
-cera <- preprocess('data/CERA-20C_snow.nc', var = 'rsn', monthly = TRUE) * preprocess('data/CERA-20C_snow.nc', var = 'sd', monthly = TRUE)
+era <- (brick('data/era-interim_snow.nc', varname = 'rsn') * 
+  brick('data/era-interim_snow.nc', varname = 'sd')) %>%
+  projectRaster(ccsm)
 
-cera_dat <- cera %>%
+era_dat <- era %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
   mutate(year = round(parse_number(layer))) %>%
-  filter(between(year, 1920, 2010)) %>%
   rename(SWE = value) %>%
   select(-layer)
 ```
 
 
 ```{r}
-cera_pca <- cera_dat %>%
-  group_by(x, y) %>%
-  mutate(test = all(SWE == 0)) %>%
-  filter(test == FALSE) %>%
-  ungroup() %>%
-  select(-test)%>%
-  spread(year, SWE) %>%
-  select(-x, -y) %>%
-  t() %>%
-  prcomp(scale. = TRUE)
+era_pca <- calc_pcs(era_dat)
+era_eigs <- get_eigs(era_pca, era)
 ```
 
 ```{r, echo = FALSE}
-cera_eigs <- cera_pca %>%
-  tidy(matrix = 'pcs') %>%
-  mutate(eigenvalues = std.dev ^ 2,
-         error = sqrt(2 / n_effective(cera)),
-         low =  eigenvalues * (1 - error) * 100 / sum(eigenvalues),
-         hi = eigenvalues * (1 + error) * 100 / sum(eigenvalues),
-         cumvar_line = hi + 0.02 * max(hi))
+plotnScree(nScree(era_eigs$eigenvalues))
 ```
 
 ```{r}
-nCng(cera_eigs$eigenvalues)
+era_eofs <- get_eofs(era_pca, era_eigs, 9)
 ```
 
-
-
-```{r plot_variance_obs, fig.width = 5, fig.height = 4, echo = FALSE}
-cera_eigs %>% 
-    filter(PC <= 20) %>%
+```{r plot_variance_obs, echo = FALSE}
+era_eigs %>% 
+      mutate(separated = if_else(is.na(lag(low)), TRUE, hi < lag(low)),
+          multiplet = as.factor(cumsum(separated))) %>%
+    filter(PC <= 25) %>%
 ggplot(aes(x = PC, y = percent * 100)) +
-  geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
-  geom_point(size = 2) + 
+  geom_linerange(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
+  geom_point(size = 2, aes(color = multiplet)) + 
  geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
   labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
-  geom_vline(xintercept = 3.5, linetype = 2, color = 'red', alpha = .7) +
+  geom_vline(xintercept = 9 + .5, linetype = 2, color = 'red', alpha = .7) +
   theme_bw() + 
   guides(color = F) + 
-  scale_x_continuous(breaks = seq(0, 12, 2))
+  scale_x_continuous(breaks = seq(0, 25, 5))
 ```
-
-```{r calc_eofs}
-eofs_cera <- cera_pca %>% # calculate unrotated EOFs
-  tidy(matrix = 'variables') %>%
-  filter(PC <= 9) %>%
-  left_join(cera_eigs[1:2], by = 'PC') %>%
-  mutate(eof = value * std.dev,
-         PC = as.character(PC)) %>%
-  select(-std.dev,-value) 
-```
-
 
 ```{r, echo = FALSE}
-cera_dat %>%
+era_dat %>%
     group_by(x, y) %>%
   mutate(test = all(SWE== 0)) %>%
   filter(test == FALSE) %>%
@@ -702,56 +666,86 @@ cera_dat %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
-  full_join(eofs_cera) %>%
+  full_join(era_eofs) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = eof)) +
   geom_sf(data = states_wus, fill = NA, color = 'black') +
   facet_wrap(~PC) +
-  scale_fill_distiller(palette = 'RdBu') +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1,1)) +
   theme_void()+
   ggtitle('Observed April 1st SWE EOFS')
 ```
 
+
 ```{r}
-pcs_livneh <- tidy(livneh_pca) %>%
-  mutate(water_year = as.numeric(as.character(row))) %>%
-  filter(PC <= 9, water_year >= 1982) %>%
-  mutate(PC = paste0('PC', PC)) %>%
-  spread(PC, value)
+comb_pca <- ccsm_dat %>%
+  select(-area) %>%
+  filter(between(year, 1800, 1836)) %>%
+  bind_rows(era_dat) %>%
+  calc_pcs()
+comb_eigs <- get_eigs(comb_pca, ccsm)
+```
 
-pcs_obs <- tidy(obs_pca) %>%
-  mutate(water_year = as.numeric(as.character(row))) %>%
-  filter(PC <= 9, water_year <= 2010) %>%
-  mutate(PC = paste0('PC', PC)) %>%
-  spread(PC, value)
+```{r, echo = FALSE}
+plotnScree(nScree(comb_eigs$eigenvalues))
+```
 
-pcs_cera <- tidy(cera_pca) %>%
-  mutate(water_year = as.numeric(as.character(row))) %>%
-  filter(PC <= 9, water_year >= 1982) %>%
-  mutate(PC = paste0('PC', PC)) %>%
-  spread(PC, value)
+```{r}
+comb_eofs <- get_eofs(comb_pca, comb_eigs, 9)
+```
+
+```{r plot_variance_obs, echo = FALSE}
+scree_plot(comb_eigs, 9)
+```
+
+```{r, echo = FALSE}
+eof_plot(prism_dat, eofs_obs)
+
+eof_plot(era_dat, era_eofs)
+
+eof_plot(ccsm_dat, eofs_sim)
+
+ccsm_dat %>%
+  select(-area) %>%
+    filter(between(year, 1800, 1836)) %>%
+  bind_rows(era_dat) %>%
+   eof_plot(comb_eofs)
 ```
 
 
 ```{r}
-pcs_livneh %>%
-  gather(PC, value, PC1:PC3) %>%
-ggplot(aes(water_year, value)) +
-  geom_line() +
-  facet_wrap(~PC)
+get_pcs <- function(pc_object, k){
+   tidy(pc_object) %>%
+  mutate(water_year = as.numeric(as.character(row))) %>%
+  filter(PC <= k) %>%
+  mutate(PC = paste0('PC', PC)) %>%
+  spread(PC, value)
+}
+pcs_obs <- get_pcs(obs_pca, 9)
+pcs_era <- get_pcs(era_pca, 9)
+pcs_comb <- get_pcs(comb_pca, 9)
 ```
+
 
 ```{r}
 pcs_obs %>%
-  gather(PC, value, PC1:PC3) %>%
+  gather(PC, value, PC1:PC9) %>%
 ggplot(aes(water_year, value)) +
   geom_line() +
   facet_wrap(~PC)
 ```
 
 ```{r}
-pcs_cera %>%
-  gather(PC, value, PC1:PC3) %>%
+pcs_era %>%
+  gather(PC, value, PC1:PC9) %>%
+ggplot(aes(water_year, value)) +
+  geom_line() +
+  facet_wrap(~PC)
+```
+
+```{r}
+pcs_comb %>%
+  gather(PC, value, PC1:PC9) %>%
 ggplot(aes(water_year, value)) +
   geom_line() +
   facet_wrap(~PC)
@@ -811,7 +805,7 @@ cera_dat %>%
 ```
 
 ```{r}
-swe_dat %>%
+prism_dat %>%
     group_by(x, y) %>%
   mutate(test = all(SWE== 0)) %>%
   filter(test == FALSE) %>%
@@ -1015,7 +1009,7 @@ test %>%
 
 What about the temporal autocorrelation in the observations and simulations?
 ```{r, echo = FALSE, warning = FALSE}
-swe_dat %>%
+prism_dat %>%
   group_by(x, y) %>%
   mutate(rho = cor(SWE, lag(SWE), use = 'complete.obs')) %>%
    ggplot(aes(x, y)) +
