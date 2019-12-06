@@ -753,6 +753,76 @@ full_join(t1, t2, by = 'PC') %>%
 ```
 
 
+```{r}
+can_cor$cor %>% c() %>% diag()
+
+can_cor$ycoef
+
+library(CCP)
+CCP::p.asym(can_cor$cor,N = 29, p = 9, q = 9, m)
+
+
+```
+
+```{r}
+library(remote)
+eot1 <- cera_dat %>%
+  spread(year, SWE) %>%
+  rasterFromXYZ() %>%
+  anomalize() %>%
+  denoise(expl.var = .9)
+
+eot2 <- prism_dat %>%
+  select(-area) %>%
+  filter(year <= 2010) %>%
+  spread(year, SWE) %>%
+  rasterFromXYZ() %>%
+  anomalize() %>% 
+  denoise(expl.var = .9)
+
+telecon <- eot(eot1, eot2, n = 6)
+
+remote::denoise
+
+
+```
+
+```{r}
+walk(1:6, ~plot(telecon, y = .))
+```
+
+```{r}
+cera_dat %>%
+  spread(year, SWE) %>%
+  mutate(column = 1:n()) %>%
+  select(x, y, column) %>%
+  bind_cols(cera_can) %>%
+  gather(pattern, value, V1:V6) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+  #geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~pattern) +
+  scale_fill_distiller(palette = 'RdBu') +
+  theme_void()+
+  coord_quickmap() +
+  ggtitle('Reanalysis CCA')
+
+prism_dat %>%
+  spread(year, SWE) %>%
+  mutate(column = 1:n()) %>%
+  select(x, y, column) %>%
+  bind_cols(prism_can) %>%
+  gather(pattern, value, PC1:PC6) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+  #geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~pattern) +
+  scale_fill_distiller(palette = 'RdBu') +
+  theme_void()+
+  coord_quickmap() +
+  ggtitle('Observed CCA')
+```
+
 ## Reconstruction
 
 ```{r}
