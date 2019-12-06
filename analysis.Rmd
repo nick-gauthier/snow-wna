@@ -16,7 +16,7 @@ link-citations: yes
 
 Analysis of simulated and observed snow water equivalent (SWE) dynamics in western North America over the Common Era.
 
-## Setup
+# Setup
 
 Import the packages required for this analysis.
 
@@ -49,7 +49,9 @@ states_wus <- maps::map('state', regions = state_names,
                     fill = TRUE, plot = FALSE) %>% st_as_sf
 ```
 
-## Observations
+## Data
+
+### Rasters
 
 Import the snow observation data from https://nsidc.org/data/nsidc-0719.^[What's up with this warning message? long_name=CRS definition
 spatial_ref=GEOGCS["NAD83",DATUM["North_American_Datum_1983",SPHEROID["GRS 1980",6378137,298.257222101,AUTHORITY["EPSG","7019"]],AUTHORITY["EPSG","6269"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.01745329251994328,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4269"]]
@@ -105,6 +107,33 @@ area_obs <- raster::area(swe_obs) %>%
   rename(area = value)
 ```
 
+```{r}
+ccsm <- preprocess('data/snw_LImon_CCSM4_past1000_r1i1p1_085001-185012.nc', 
+                   var = 'snw', 
+                   flip = TRUE, 
+                   monthly = TRUE)
+```
+
+```{r}
+cera <- (brick('data/CERA-20C_snow.nc', varname = 'rsn') * 
+  brick('data/CERA-20C_snow.nc', varname = 'sd')) %>%
+  projectRaster(ccsm)
+```
+
+### Data Frames
+
+```{r}
+snow_only <- function(dat){
+  dat %>%
+      group_by(x, y) %>%
+  mutate(test = all(near(SWE, 0) | is.na(SWE))) %>%
+  filter(test == FALSE) %>%
+  ungroup() %>%
+  select(-test)
+}
+```
+
+
 Turn all the rasters into data frames and join.
 ```{r}
 prism_dat <- swe_obs %>%
@@ -112,11 +141,30 @@ prism_dat <- swe_obs %>%
   mutate(year = round(parse_number(layer))) %>%
   rename(SWE = value) %>%
   select(-layer) %>%
-  left_join(area_obs)
+  left_join(area_obs) %>%
+  snow_only()
 ```
 
+```{r}
+cera_dat <- cera %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = round(parse_number(layer))) %>%
+  rename(SWE = value) %>%
+  select(-layer) %>%
+  snow_only()
+```
 
+```{r}
+ccsm_dat <- ccsm %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = str_sub(layer, 2) %>% parse_number() %>% round) %>%
+  rename(SWE = value) %>%
+  select(-layer) %>%
+  left_join(ccsm_areas, by = c('x', 'y')) %>%
+  snow_only()
+```
 
+# Observations
 Look at how SWE has varied over time and space.
 
 ```{r animation, echo = FALSE, warning=FALSE,cache = TRUE}
@@ -202,14 +250,6 @@ cesm_h2osno_ext <- preprocess('~/Downloads/b.e11.BLMTRC5CN.f19_g16.001.clm2.h1.H
 ```
 
 
-```{r}
-ccsm <- preprocess('data/snw_LImon_CCSM4_past1000_r1i1p1_085001-185012.nc', 
-                   var = 'snw', 
-                   flip = TRUE, 
-                   monthly = TRUE)
-```
-
-
 This comparison suggests that CESM is underpredicting SWE because of the simplified topography. Check this by looking at the underlying topography boundary files for that simulation.
 ```{r}
 surface_geop <- raster('data/consistent-topo-fv1.9x2.5_c130424.nc', 
@@ -257,13 +297,6 @@ cesm_dat <- c(cesm_h2osno, cesm_h2osno_ext) %>%
   rename(SWE = value) %>%
   select(-layer) %>%
   left_join(cesm_areas, by = c('x', 'y'))
-
-ccsm_dat <- ccsm %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
-  mutate(year = str_sub(layer, 2) %>% parse_number() %>% round) %>%
-  rename(SWE = value) %>%
-  select(-layer) %>%
-  left_join(ccsm_areas, by = c('x', 'y'))
 ```
 
 ```{r animation_cesm, echo = FALSE, cache = TRUE}
@@ -410,16 +443,13 @@ ccsm %>% resample(cesm_h2osno_ext) %>% mean %>% plot
 Might be interesting to look at snow centroid date too down the road. Spatial patterns notwithstanding, maybe the aggregate temporal patterns are still recoverable?
 
 
-### Empirical Orthogonal Functions
+# Coupled Pattern Analysis
+
+## PCA
 
 ```{r}
 calc_pcs <- function(dat, scale = TRUE){
   dat %>%
-    group_by(x, y) %>%
-    mutate(test = all(SWE == 0)) %>%
-    filter(test == FALSE) %>%
-    ungroup() %>%
-    select(-test)%>%
     spread(year, SWE) %>%
     select(-x, -y) %>%
     t() %>%
@@ -436,8 +466,9 @@ obs_pca <- prism_dat %>%
 sim_pca <- ccsm_dat %>% 
   select(-area) %>% 
   calc_pcs()
-```
 
+cera_pca <- calc_pcs(cera_dat)
+```
 
 
 ```{r}
@@ -485,19 +516,21 @@ get_eigs <- function(pc_object, raster){
 }
 ```
 
-
 ```{r, echo = FALSE}
 obs_eigs <- get_eigs(obs_pca, swe_obs)
 sim_eigs <- get_eigs(sim_pca, ccsm)
+cera_eigs <- get_eigs(cera_pca, cera)
 ```
 
 ```{r, echo = FALSE}
 obs_eigs$eigenvalues %>%
   nScree() %>%
   plotnScree()
-```
 
-```{r, echo = FALSE}
+cera_eigs$eigenvalues %>%
+  nScree() %>%
+  plotnScree()
+
 sim_eigs$eigenvalues %>%
   nScree() %>%
   plotnScree()
@@ -534,31 +567,31 @@ map_lgl(1:276, ~eigen_test(sim_eigs$eigenvalues, k = ., M = 276, n = 1001))
 
 
 ```{r}
-scree_plot <- function(eigs, k){
+plot_scree <- function(eigs, k){
   eigs %>% 
-      mutate(separated = if_else(is.na(lag(low)), TRUE, hi < lag(low)),
-          multiplet = as.factor(cumsum(separated))) %>%
+    mutate(separated = if_else(is.na(lag(low)), TRUE, hi < lag(low)),
+           multiplet = as.factor(cumsum(separated))) %>%
     filter(PC <= 25) %>%
-ggplot(aes(x = PC, y = percent * 100)) +
-  geom_linerange(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
-  geom_point(size = 2, aes(color = multiplet)) + 
- geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
-  labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
-  geom_vline(xintercept = k + .5, linetype = 2, color = 'red', alpha = .7) +
-  theme_bw() + 
-  guides(color = F) + 
-  scale_x_continuous(breaks = seq(0, 25, 5))
+    ggplot(aes(x = PC, y = percent * 100)) +
+    geom_linerange(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
+    geom_point(size = 2, aes(color = multiplet)) + 
+    geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
+    labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
+    geom_vline(xintercept = k + .5, linetype = 2, color = 'red', alpha = .7) +
+    theme_bw() + 
+    guides(color = F) + 
+    scale_x_continuous(breaks = seq(0, 25, 5))
 }
 ```
 
 ```{r plot_variance_obs, echo = FALSE}
-sree_plot(obs_eigs, 9)
+plot_scree(obs_eigs, 9)
+plot_scree(sim_eigs, 9)
+plot_scree(sim_eigs, 9)
 ```
 
 
-```{r plot_variance_sim}
-scree_plot(sim_eigs, 9)
-```
+## EOFs
 
 ```{r}
 get_eofs <- function(pca_object, eigenvalues, k){
@@ -575,17 +608,13 @@ get_eofs <- function(pca_object, eigenvalues, k){
 ```{r calc_eofs}
 eofs_obs <- get_eofs(obs_pca, obs_eigs, 9)
 eofs_sim <- get_eofs(sim_pca, sim_eigs, 9)
+cera_eofs <- get_eofs(cera_pca, cera_eigs, 9)
 ```
 
 
 ```{r, echo = FALSE}
-eof_plot <- function(dat, eofs){
+plot_eof <- function(dat, eofs){
   dat %>%
-    group_by(x, y) %>%
-  mutate(test = all(SWE== 0)) %>%
-  filter(test == FALSE) %>%
-  ungroup() %>%
-  select(-test) %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
@@ -602,87 +631,141 @@ eof_plot <- function(dat, eofs){
 
 
 ```{r}
-eof_plot(prism_dat, eofs_obs)
-```
-
-
-```{r, echo = FALSE}
-eof_plot(ccsm_dat, eofs_sim)
+plot_eof(prism_dat, eofs_obs)
+plot_eof(cera_dat, cera_eofs)
+plot_eof(ccsm_dat, eofs_sim)
 ```
 
 So they're the same! next do a Canonical Correlation Analysis
 
-## Canonical Correlation Analysis
-
-```{r}
-era <- (brick('data/era-interim_snow.nc', varname = 'rsn') * 
-  brick('data/era-interim_snow.nc', varname = 'sd')) %>%
-  projectRaster(ccsm)
-
-era_dat <- era %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
-  mutate(year = round(parse_number(layer))) %>%
-  rename(SWE = value) %>%
-  select(-layer)
-```
+## CCA
 
 
 ```{r}
-era_pca <- calc_pcs(era_dat)
-era_eigs <- get_eigs(era_pca, era)
+get_pcs <- function(pc_object, k){
+   tidy(pc_object) %>%
+  mutate(water_year = as.numeric(as.character(row))) %>%
+  filter(PC <= k) %>%
+  mutate(PC = paste0('PC', PC)) %>%
+  spread(PC, value)
+}
+pcs_obs <- get_pcs(obs_pca, 9)
+pcs_cera <- get_pcs(cera_pca, 9)
 ```
+
 
 ```{r, echo = FALSE}
-plotnScree(nScree(era_eigs$eigenvalues))
+pcs_obs %>%
+  gather(PC, value, PC1:PC9) %>%
+ggplot(aes(water_year, value)) +
+  geom_line() +
+  facet_wrap(~PC)
+
+pcs_cera %>%
+  gather(PC, value, PC1:PC9) %>%
+ggplot(aes(water_year, value)) +
+  geom_line() +
+  facet_wrap(~PC)
 ```
 
 ```{r}
-era_eofs <- get_eofs(era_pca, era_eigs, 9)
+t1 <- pcs_obs %>%
+  filter(water_year <= 2010) %>%
+  select(PC1:PC9) %>%
+  as.matrix() %>%
+  scale()
+
+t2 <- pcs_cera %>%
+  select(PC1:PC9) %>%
+  as.matrix() %>%
+  scale()
+
+can_cor<- cancor(t1, t2, xcenter = FALSE, ycenter = FALSE) # pcs already centered
 ```
 
-```{r plot_variance_obs, echo = FALSE}
-era_eigs %>% 
-      mutate(separated = if_else(is.na(lag(low)), TRUE, hi < lag(low)),
-          multiplet = as.factor(cumsum(separated))) %>%
-    filter(PC <= 25) %>%
-ggplot(aes(x = PC, y = percent * 100)) +
-  geom_linerange(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
-  geom_point(size = 2, aes(color = multiplet)) + 
- geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
-  labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
-  geom_vline(xintercept = 9 + .5, linetype = 2, color = 'red', alpha = .7) +
-  theme_bw() + 
-  guides(color = F) + 
-  scale_x_continuous(breaks = seq(0, 25, 5))
+```{r}
+can_cor$cor
 ```
 
-```{r, echo = FALSE}
-era_dat %>%
-    group_by(x, y) %>%
-  mutate(test = all(SWE== 0)) %>%
-  filter(test == FALSE) %>%
-  ungroup() %>%
-  select(-test) %>%
+```{r}
+cera_can <- cera_eofs %>%
+  spread(PC, eof) %>%
+  select(-column) %>%
+  as.matrix() %>%
+  `%*%`(can_cor$ycoef) %>%
+  as_tibble()
+  
+prism_can <- eofs_obs %>%
+  spread(PC, eof) %>%
+  select(-column) %>%
+  as.matrix() %>%
+  `%*%`(can_cor$xcoef) %>%
+  `colnames<-`(paste0('PC', 1:9)) %>%
+  as_tibble()
+```
+
+```{r}
+cera_dat %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
-  full_join(era_eofs) %>%
+  bind_cols(cera_can) %>%
+  gather(pattern, value, V1:V9) %>%
   ggplot() +
-  geom_raster(aes(x, y, fill = eof)) +
-  geom_sf(data = states_wus, fill = NA, color = 'black') +
-  facet_wrap(~PC) +
-  scale_fill_distiller(palette = 'RdBu', limits = c(-1,1)) +
+  geom_raster(aes(x, y, fill = value)) +
+  #geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~pattern) +
+  scale_fill_distiller(palette = 'RdBu') +
   theme_void()+
-  ggtitle('Observed April 1st SWE EOFS')
+  coord_quickmap() +
+  ggtitle('Reanalysis CCA')
+
+prism_dat %>%
+  spread(year, SWE) %>%
+  mutate(column = 1:n()) %>%
+  select(x, y, column) %>%
+  bind_cols(prism_can) %>%
+  gather(pattern, value, V1:V9) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+  #geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~pattern) +
+  scale_fill_distiller(palette = 'RdBu') +
+  theme_void()+
+  coord_quickmap() +
+  ggtitle('Observed CCA')
 ```
 
+### Validation
+
+```{r}
+t1 <- pcs_cera %>%
+  gather(PC, value, PC1:PC9)
+
+t2 <- prism_can %>%
+  gather(PC, value, PC1:PC9) 
+
+can_cor$cor
+full_join(t1, t2, by = 'PC') %>%
+  mutate(test = value.x * value.y) %>% 
+  
+  
+```
+
+
+## Reconstruction
 
 ```{r}
 comb_pca <- ccsm_dat %>%
   select(-area) %>%
-  filter(between(year, 1800, 1836)) %>%
-  bind_rows(era_dat) %>%
+  filter(between(year, 1800, 1832)) %>%
+  bind_rows(cera_dat) %>%
+  snow_only() %>%
+      spread(year, SWE) %>%
+  remove_missing()%>%
+  gather(year, SWE, `1800`:`2010`) %>%
   calc_pcs()
+
 comb_eigs <- get_eigs(comb_pca, ccsm)
 ```
 
@@ -695,136 +778,23 @@ comb_eofs <- get_eofs(comb_pca, comb_eigs, 9)
 ```
 
 ```{r plot_variance_obs, echo = FALSE}
-scree_plot(comb_eigs, 9)
+plot_scree(comb_eigs, 9)
 ```
 
 ```{r, echo = FALSE}
-eof_plot(prism_dat, eofs_obs)
+plot_eof(prism_dat, eofs_obs)
 
-eof_plot(era_dat, era_eofs)
-
-eof_plot(ccsm_dat, eofs_sim)
+plot_eof(cera_dat, cera_eofs)
 
 ccsm_dat %>%
   select(-area) %>%
     filter(between(year, 1800, 1836)) %>%
-  bind_rows(era_dat) %>%
-   eof_plot(comb_eofs)
+  bind_rows(cera_dat) %>%
+   plot_eof(comb_eofs)
+
+plot_eof(ccsm_dat, eofs_sim)
 ```
 
-
-```{r}
-get_pcs <- function(pc_object, k){
-   tidy(pc_object) %>%
-  mutate(water_year = as.numeric(as.character(row))) %>%
-  filter(PC <= k) %>%
-  mutate(PC = paste0('PC', PC)) %>%
-  spread(PC, value)
-}
-pcs_obs <- get_pcs(obs_pca, 9)
-pcs_era <- get_pcs(era_pca, 9)
-pcs_comb <- get_pcs(comb_pca, 9)
-```
-
-
-```{r}
-pcs_obs %>%
-  gather(PC, value, PC1:PC9) %>%
-ggplot(aes(water_year, value)) +
-  geom_line() +
-  facet_wrap(~PC)
-```
-
-```{r}
-pcs_era %>%
-  gather(PC, value, PC1:PC9) %>%
-ggplot(aes(water_year, value)) +
-  geom_line() +
-  facet_wrap(~PC)
-```
-
-```{r}
-pcs_comb %>%
-  gather(PC, value, PC1:PC9) %>%
-ggplot(aes(water_year, value)) +
-  geom_line() +
-  facet_wrap(~PC)
-```
-
-
-
-```{r}
-t1 <- pcs_obs %>%
-  select(PC1:PC9) %>%
-  as.matrix() %>%
-  scale()
-t2 <- pcs_cera %>%
-  select(PC1:PC9) %>%
-  as.matrix() %>%
-  scale()
-
-t3 <- cancor(t1, t2, xcenter = FALSE, ycenter = FALSE) # pcs already centered
-```
-
-```{r}
-t4 <- eofs_cera %>%
-  spread(PC, eof) %>%
-  select(-column) %>%
-  as.matrix() %>%
-  `%*%`(t3$ycoef) %>%
-  as_tibble()
-  
-t5 <- eofs_obs %>%
-  spread(PC, eof) %>%
-  select(-column) %>%
-  as.matrix() %>%
-  `%*%`(t3$xcoef) %>%
-  as_tibble()
-```
-
-```{r}
-cera_dat %>%
-    group_by(x, y) %>%
-  mutate(test = all(SWE== 0)) %>%
-  filter(test == FALSE) %>%
-  ungroup() %>%
-  select(-test) %>%
-  spread(year, SWE) %>%
-  mutate(column = 1:n()) %>%
-  select(x, y, column) %>%
-  bind_cols(t4) %>%
-  gather(pattern, value, V1:V9) %>%
-  ggplot() +
-  geom_raster(aes(x, y, fill = value)) +
-  #geom_sf(data = states_wus, fill = NA, color = 'black') +
-  facet_wrap(~pattern) +
-  scale_fill_distiller(palette = 'RdBu') +
-  theme_void()+
-  coord_quickmap() +
-  ggtitle('Reanalysis CCA')
-```
-
-```{r}
-prism_dat %>%
-    group_by(x, y) %>%
-  mutate(test = all(SWE== 0)) %>%
-  filter(test == FALSE) %>%
-  ungroup() %>%
-  select(-test) %>%
-  spread(year, SWE) %>%
-  mutate(column = 1:n()) %>%
-  select(x, y, column) %>%
-  bind_cols(t5) %>%
-  gather(pattern, value, V1:V9) %>%
-  ggplot() +
-  geom_raster(aes(x, y, fill = value)) +
-  #geom_sf(data = states_wus, fill = NA, color = 'black') +
-  facet_wrap(~pattern) +
-  scale_fill_distiller(palette = 'RdBu') +
-  theme_void()+
-  coord_quickmap() +
-  ggtitle('Observed CCA')
-```
 
 ## Reanalysis
 

@@ -33,7 +33,7 @@ snow_request <- list(
   area    = "70/-130/30/-60",
   class   = "ep",
   dataset = "cera20c",
-  date    = dates,
+  date    = paste0(paste0(1982:2010,'03','01'), collapse = '/'),
   expver  = "1",
   grid    = "1.0/1.0",
   levtype = "sfc",
