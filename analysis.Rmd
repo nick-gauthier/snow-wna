@@ -401,22 +401,6 @@ Might be interesting to look at snow centroid date too down the road. Spatial pa
 
 ### Empirical Orthogonal Functions
 
-
-```{r}
-livneh <- preprocess('~/Downloads/LIVNEH/swe.mon.mean.nc', 
-                   var = 'swe', 
-                   flip = TRUE, 
-                   monthly = TRUE)
-
-livneh_dat <- livneh %>%
-    as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
-  mutate(year = round(parse_number(layer))) %>%
-  filter(between(year, 1920, 2010)) %>%
-  rename(SWE = value) %>%
-  select(-layer)
-```
-
-
 ```{r}
 obs_pca <- swe_dat %>%
   group_by(x, y) %>%
@@ -440,18 +424,12 @@ sim_pca <- ccsm_dat %>%
   select(-x, -y, -area) %>%
   t() %>%
   prcomp(scale. = TRUE)
-
-livneh_pca <- livneh_dat %>%
-  group_by(x, y) %>%
-  mutate(test = all(SWE == 0)) %>%
-  filter(test == FALSE) %>%
-  ungroup() %>%
-  select(-test)%>%
-  spread(year, SWE) %>%
-  select(-x, -y) %>%
-  t() %>%
-  prcomp(scale. = TRUE)
 ```
+
+```{r}
+
+```
+
 
 ```{r}
 area_weight <- function(x){
@@ -495,14 +473,6 @@ obs_eigs <- obs_pca %>%
          hi = eigenvalues * (1 + error) * 100 / sum(eigenvalues),
          cumvar_line = hi + 0.02 * max(hi))
 
-livneh_eigs <- livneh_pca %>%
-  tidy(matrix = 'pcs') %>%
-  mutate(eigenvalues = std.dev ^ 2,
-         error = sqrt(2 / n_effective(livneh)),
-         low =  eigenvalues * (1 - error) * 100 / sum(eigenvalues),
-         hi = eigenvalues * (1 + error) * 100 / sum(eigenvalues),
-         cumvar_line = hi + 0.02 * max(hi))
-
 sim_eigs <- sim_pca %>%
   tidy(matrix = 'pcs') %>%
   mutate(eigenvalues = std.dev ^ 2,
@@ -531,19 +501,6 @@ ggplot(aes(x = PC, y = percent * 100)) +
   scale_x_continuous(breaks = seq(0, 12, 2))
 ```
 
-```{r plot_variance_livneh, fig.width = 5, fig.height = 4, echo = FALSE}
-livneh_eigs %>% 
-    filter(PC <= 20) %>%
-ggplot(aes(x = PC, y = percent * 100)) +
-  geom_errorbar(aes(x = PC, ymin = low, ymax = hi), width = 0.4) +
-  geom_point(size = 2) + 
- geom_text(aes(x = PC, y = cumvar_line, label = paste0(round(cumulative * 100, 0), '%')), size = 2.5, vjust = 0) +
-  labs(x = "Principal Component", y = "Normalized Eigenvalue") + 
-  geom_vline(xintercept = 3.5, linetype = 2, color = 'red', alpha = .7) +
-  theme_bw() + 
-  guides(color = F) + 
-  scale_x_continuous(breaks = seq(0, 12, 2))
-```
 
 ```{r plot_variance_sim, fig.width = 5, fig.height = 4, echo = FALSE}
 sim_eigs %>% 
@@ -574,15 +531,7 @@ eofs_sim <- sim_pca %>% # calculate unrotated EOFs
   left_join(sim_eigs[1:2], by = 'PC') %>%
   mutate(eof = value * std.dev,
          PC = as.character(PC)) %>%
-  select(-std.dev,-value) 
-
-eofs_livneh <- livneh_pca %>% # calculate unrotated EOFs
-  tidy(matrix = 'variables') %>%
-  filter(PC <= 9) %>%
-  left_join(livneh_eigs[1:2], by = 'PC') %>%
-  mutate(eof = value * std.dev,
-         PC = as.character(PC)) %>%
-  select(-std.dev,-value) 
+  select(-std.dev,-value)
 ```
 
 
@@ -606,25 +555,7 @@ swe_dat %>%
   ggtitle('Observed April 1st SWE EOFS')
 ```
 
-```{r, echo = FALSE}
-livneh_dat%>%
-    group_by(x, y) %>%
-  mutate(test = all(SWE== 0)) %>%
-  filter(test == FALSE) %>%
-  ungroup() %>%
-  select(-test) %>%
-  spread(year, SWE) %>%
-  mutate(column = 1:n()) %>%
-  select(x, y, column) %>%
-  full_join(eofs_livneh) %>%
-  ggplot() +
-  geom_raster(aes(x, y, fill = eof)) +
-  geom_sf(data = states_wus, fill = NA, color = 'black') +
-  facet_wrap(~PC) +
-  scale_fill_distiller(palette = 'RdBu') +
-  theme_void()+
-  ggtitle('Observed April 1st SWE EOFS')
-```
+
 
 ```{r, echo = FALSE}
 ccsm_dat %>%
