@@ -94,17 +94,21 @@ plan(multisession)
 
 ```{r message=FALSE,warning=FALSE}
 # import SWE data
-swe_obs <- list.files('data', pattern = 'SWE_Depth', full.names = TRUE) %>%
+prism <- list.files('data', pattern = 'SWE_Depth', full.names = TRUE) %>%
   future_map(preprocess_prism, var = 'SWE') %>%
   brick() %>%
   setNames(1982:2017)
 ```
 
 ```{r}
-area_obs <- raster::area(swe_obs) %>%
+area_obs <- raster::area(prism) %>%
     as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
   select(-layer) %>%
   rename(area = value)
+
+ccsm_areas <- raster::area(ccsm) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
+  rename(area = layer)
 ```
 
 ```{r}
@@ -136,7 +140,7 @@ snow_only <- function(dat){
 
 Turn all the rasters into data frames and join.
 ```{r}
-prism_dat <- swe_obs %>%
+prism_dat <- prism %>%
   as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
   mutate(year = round(parse_number(layer))) %>%
   rename(SWE = value) %>%
@@ -237,80 +241,6 @@ ggplot(obs_agg, aes(area, SWE)) +
   labs(x = 'Area (km2)', title = 'Relationship between total SWE and snow extent')
 ```
 
-## CESM-LME Comparison
-
-```{r}
-cesm_h2osno <- preprocess('~/Downloads/b.e11.BLMTRC5CN.f19_g16.001.clm2.h1.H2OSNO.08500101-18491231.nc',
-                          var = 'H2OSNO',
-                          flip = TRUE)
-
-cesm_h2osno_ext <- preprocess('~/Downloads/b.e11.BLMTRC5CN.f19_g16.001.clm2.h1.H2OSNO.18500101-20051231.nc',
-                          var = 'H2OSNO',
-                          flip = TRUE)
-```
-
-
-This comparison suggests that CESM is underpredicting SWE because of the simplified topography. Check this by looking at the underlying topography boundary files for that simulation.
-```{r}
-surface_geop <- raster('data/consistent-topo-fv1.9x2.5_c130424.nc', 
-                       var = 'PHIS') %>%
-  rotate() %>%
-  crop(bbox, snap = 'out') %>%
-  `/`(9.80665) %>%
-  as.data.frame(na.rm = TRUE, xy = TRUE) 
-
-landfrac <- raster('data/consistent-topo-fv1.9x2.5_c130424.nc', 
-                   var = 'LANDFRAC') %>%
-  rotate() %>%
-  crop(bbox, snap = 'out')
-```
-
-```{r, echo = FALSE}
-ggplot(surface_geop) +
-  geom_raster(aes(x, y, fill = surface.geopotential)) +
-  scale_fill_viridis_c() +
-  geom_sf(data = states_wus, fill = NA, color = 'white') +
-  theme_void() +
-  ggtitle('CESM LME Topography')
-```
-
-
-```{r}
-cesm_areas <- area(cesm_h2osno) %>%
-  `*`(landfrac) %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
-  rename(area = layer)
-
-ccsm_areas <- raster::area(ccsm) %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
-  rename(area = layer)
-```
-
-
-still need to account for snow fraction of grid cell? and land fraction too?
-
-```{r}
-cesm_dat <- c(cesm_h2osno, cesm_h2osno_ext) %>%
-  brick() %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
-  mutate(year = str_sub(layer, 2) %>% parse_number() %>% round) %>%
-  rename(SWE = value) %>%
-  select(-layer) %>%
-  left_join(cesm_areas, by = c('x', 'y'))
-```
-
-```{r animation_cesm, echo = FALSE, cache = TRUE}
-cesm_dat %>%
-  filter(year < 1000) %>%
-  ggplot() +
-  geom_raster(aes(x, y, fill = SWE)) +
-  geom_sf(data = states_wus, fill = NA, colour = 'white') +
-  scale_fill_viridis_c() +
-  coord_sf()+
-  theme_void() +
-  ggtitle("Simulated Snow Water Equivalent", "April 1st, {closest_state}") +
-  transition_states(year)
-```
 
 ```{r animation_ccsm, echo = FALSE, cache = TRUE}
 ccsm_dat %>%
@@ -416,14 +346,14 @@ mean_swe_ccsm_ext <- ccsm_dat %>%
   group_by(x, y) %>%
   summarise(sim = mean(SWE))
 
-swe_obs_resamp <- swe_obs %>%
+prism_resamp <- prism %>%
   subset(1:24) %>% 
   mean %>%
   resample(ccsm) %>%
   as.data.frame(xy = TRUE, na.rm = TRUE) %>%
   rename(obs = layer)
 
-left_join(swe_obs_resamp, mean_swe_ccsm_ext, by = c('x', 'y')) %>%
+left_join(prism_resamp, mean_swe_ccsm_ext, by = c('x', 'y')) %>%
   gather(type, SWE, 3:4) %>%
 ggplot() +
   geom_raster(aes(x, y, fill = SWE)) +
@@ -443,7 +373,6 @@ ccsm %>% resample(cesm_h2osno_ext) %>% mean %>% plot
 Might be interesting to look at snow centroid date too down the road. Spatial patterns notwithstanding, maybe the aggregate temporal patterns are still recoverable?
 
 
-# Coupled Pattern Analysis
 
 ## PCA
 
@@ -459,7 +388,7 @@ calc_pcs <- function(dat, scale = TRUE){
 
 
 ```{r}
-obs_pca <- prism_dat %>%
+prism_pca <- prism_dat %>%
   select(-area) %>%
   calc_pcs()
 
@@ -517,13 +446,13 @@ get_eigs <- function(pc_object, raster){
 ```
 
 ```{r, echo = FALSE}
-obs_eigs <- get_eigs(obs_pca, swe_obs)
+prism_eigs <- get_eigs(prism_pca, prism)
 sim_eigs <- get_eigs(sim_pca, ccsm)
 cera_eigs <- get_eigs(cera_pca, cera)
 ```
 
 ```{r, echo = FALSE}
-obs_eigs$eigenvalues %>%
+prism_eigs$eigenvalues %>%
   nScree() %>%
   plotnScree()
 
@@ -560,9 +489,9 @@ lambda_star <- lambdas[k] / ((1 / (nrank - k + 1)) * sum(lambdas[k:nrank]))
 map_lgl(1:6, ~eigen_test(test2, k = ., M = 6, n = 31))
 
 
-map_lgl(1:36, ~eigen_test(obs_eigs$eigenvalues, k = ., M = 17783, n = 36))
+map_lgl(1:36, ~eigen_test(prism_eigs$eigenvalues, k = ., M = 17783, n = 36))
 
-map_lgl(1:276, ~eigen_test(sim_eigs$eigenvalues, k = ., M = 276, n = 1001))
+map_lgl(1:275, ~eigen_test(sim_eigs$eigenvalues, k = ., M = 276, n = 1001))
 ```
 
 
@@ -585,8 +514,8 @@ plot_scree <- function(eigs, k){
 ```
 
 ```{r plot_variance_obs, echo = FALSE}
-plot_scree(obs_eigs, 9)
-plot_scree(sim_eigs, 9)
+plot_scree(prism_eigs, 9)
+plot_scree(cera_eigs, 9)
 plot_scree(sim_eigs, 9)
 ```
 
@@ -606,8 +535,8 @@ get_eofs <- function(pca_object, eigenvalues, k){
 ```
 
 ```{r calc_eofs}
-eofs_obs <- get_eofs(obs_pca, obs_eigs, 9)
-eofs_sim <- get_eofs(sim_pca, sim_eigs, 9)
+prism_eofs <- get_eofs(prism_pca, prism_eigs, 9)
+sim_eofs <- get_eofs(sim_pca, sim_eigs, 9)
 cera_eofs <- get_eofs(cera_pca, cera_eigs, 9)
 ```
 
@@ -631,12 +560,15 @@ plot_eof <- function(dat, eofs){
 
 
 ```{r}
-plot_eof(prism_dat, eofs_obs)
+plot_eof(prism_dat, prism_eofs)
 plot_eof(cera_dat, cera_eofs)
-plot_eof(ccsm_dat, eofs_sim)
+plot_eof(ccsm_dat, sim_eofs)
 ```
 
 So they're the same! next do a Canonical Correlation Analysis
+
+# Coupled Pattern Analysis
+
 
 ## CCA
 
@@ -649,13 +581,16 @@ get_pcs <- function(pc_object, k){
   mutate(PC = paste0('PC', PC)) %>%
   spread(PC, value)
 }
-pcs_obs <- get_pcs(obs_pca, 9)
+
+pcs_prism <- get_pcs(prism_pca, 9)
 pcs_cera <- get_pcs(cera_pca, 9)
 ```
 
 
+
+
 ```{r, echo = FALSE}
-pcs_obs %>%
+pcs_prism %>%
   gather(PC, value, PC1:PC9) %>%
 ggplot(aes(water_year, value)) +
   geom_line() +
@@ -669,13 +604,35 @@ ggplot(aes(water_year, value)) +
 ```
 
 ```{r}
-t1 <- pcs_obs %>%
+library(mgcv)
+
+t2 <- pcs_cera %>%
+  filter(water_year >= 1982) %>% 
+  select(water_year, PC1:PC9)
+
+m1 <- pcs_prism %>%
+  filter(water_year <= 2010) %>%
+  select(PC5) %>%
+  rename(target = PC5) %>%
+  bind_cols(t2) %>%
+  gam(target ~ s(PC1, k = 4) + s(PC2, k =5) + s(PC3, k = 4) + s(PC4, k = 4) + s(PC5, k = 4) + s(PC6, k = 4) + s(PC7, k = 4) + s(PC8, k = 4) + s(PC9, k = 4), data = ., method = 'REML', select = TRUE)
+  
+
+plot(m1)
+summary(m1)
+gam.check(m1)
+```
+
+
+```{r}
+t1 <- pcs_prism %>%
   filter(water_year <= 2010) %>%
   select(PC1:PC9) %>%
   as.matrix() %>%
   scale()
 
 t2 <- pcs_cera %>%
+  filter(water_year >= 1982) %>% 
   select(PC1:PC9) %>%
   as.matrix() %>%
   scale()
@@ -693,9 +650,10 @@ cera_can <- cera_eofs %>%
   select(-column) %>%
   as.matrix() %>%
   `%*%`(can_cor$ycoef) %>%
+    `colnames<-`(paste0('PC', 1:9)) %>%
   as_tibble()
   
-prism_can <- eofs_obs %>%
+prism_can <- prism_eofs %>%
   spread(PC, eof) %>%
   select(-column) %>%
   as.matrix() %>%
@@ -710,7 +668,7 @@ cera_dat %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
   bind_cols(cera_can) %>%
-  gather(pattern, value, V1:V9) %>%
+  gather(pattern, value, PC1:PC9) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = value)) +
   #geom_sf(data = states_wus, fill = NA, color = 'black') +
@@ -725,7 +683,7 @@ prism_dat %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
   bind_cols(prism_can) %>%
-  gather(pattern, value, V1:V9) %>%
+  gather(pattern, value, PC1:PC9) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = value)) +
   #geom_sf(data = states_wus, fill = NA, color = 'black') +
@@ -736,21 +694,7 @@ prism_dat %>%
   ggtitle('Observed CCA')
 ```
 
-### Validation
-
-```{r}
-t1 <- pcs_cera %>%
-  gather(PC, value, PC1:PC9)
-
-t2 <- prism_can %>%
-  gather(PC, value, PC1:PC9) 
-
-can_cor$cor
-full_join(t1, t2, by = 'PC') %>%
-  mutate(test = value.x * value.y) %>% 
-  
-  
-```
+## EOTs
 
 
 ```{r}
@@ -759,7 +703,7 @@ can_cor$cor %>% c() %>% diag()
 can_cor$ycoef
 
 library(CCP)
-CCP::p.asym(can_cor$cor,N = 29, p = 9, q = 9, m)
+CCP::p.asym(can_cor$cor,N = 29, p = 9, q = 9)
 
 
 ```
@@ -767,10 +711,11 @@ CCP::p.asym(can_cor$cor,N = 29, p = 9, q = 9, m)
 ```{r}
 library(remote)
 eot1 <- cera_dat %>%
+  filter(year >=1982) %>%
   spread(year, SWE) %>%
   rasterFromXYZ() %>%
   anomalize() %>%
-  denoise(expl.var = .9)
+  denoise(expl.var = .85)
 
 eot2 <- prism_dat %>%
   select(-area) %>%
@@ -778,13 +723,9 @@ eot2 <- prism_dat %>%
   spread(year, SWE) %>%
   rasterFromXYZ() %>%
   anomalize() %>% 
-  denoise(expl.var = .9)
+  denoise(expl.var = .85)
 
 telecon <- eot(eot1, eot2, n = 6)
-
-remote::denoise
-
-
 ```
 
 ```{r}
@@ -792,48 +733,200 @@ walk(1:6, ~plot(telecon, y = .))
 ```
 
 ```{r}
-cera_dat %>%
+library(patchwork)
+plot_cancor <- function(x1, x2, y1, y2){
+  p1 <- x1 %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
-  bind_cols(cera_can) %>%
-  gather(pattern, value, V1:V6) %>%
-  ggplot() +
-  geom_raster(aes(x, y, fill = value)) +
-  #geom_sf(data = states_wus, fill = NA, color = 'black') +
-  facet_wrap(~pattern) +
-  scale_fill_distiller(palette = 'RdBu') +
-  theme_void()+
-  coord_quickmap() +
-  ggtitle('Reanalysis CCA')
-
-prism_dat %>%
-  spread(year, SWE) %>%
-  mutate(column = 1:n()) %>%
-  select(x, y, column) %>%
-  bind_cols(prism_can) %>%
+  bind_cols(x2) %>%
   gather(pattern, value, PC1:PC6) %>%
   ggplot() +
   geom_raster(aes(x, y, fill = value)) +
-  #geom_sf(data = states_wus, fill = NA, color = 'black') +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
   facet_wrap(~pattern) +
   scale_fill_distiller(palette = 'RdBu') +
   theme_void()+
-  coord_quickmap() +
-  ggtitle('Observed CCA')
+  #coord_quickmap() +
+  ggtitle('Reanalysis CCA') +
+    theme(legend.position = 'bottom')
+
+p2 <- y1 %>%
+  spread(year, SWE) %>%
+  mutate(column = 1:n()) %>%
+  select(x, y, column) %>%
+  bind_cols(y2) %>%
+  gather(pattern, value, PC1:PC6) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~pattern) +
+  scale_fill_distiller(palette = 'RdBu') +
+  theme_void()+
+  #coord_quickmap() +
+  ggtitle('Observed CCA') +
+  theme(legend.position = 'bottom')
+
+p1 + p2
+}
+
+plot_cancor(cera_dat, cera_can, prism_dat, prism_can)
 ```
+
+## Validation
+
+```{r}
+library(telefit)
+
+t1 <- prism_dat %>%
+  filter(year <= 2010) %>%
+  select(-area) %>%
+  snow_only() %>%
+  spread(year, SWE) %>%
+  select(-x, -y) %>%
+  as.matrix()
+
+t2 <- cera_dat %>%
+  filter(year >= 1982) %>% 
+  snow_only() %>%
+  spread(year, SWE) %>%
+  select(-x, -y) %>%
+  as.matrix()
+
+
+t3 <- prism_dat %>%
+  filter(year <= 2010) %>%
+  select(-area) %>%
+  snow_only() %>%
+  spread(year, SWE) %>%
+  select(x, y)
+
+preds <- cca.predict(t2, t1, t2, k.x = 9, k.y = 9)
+1 - var(as.numeric(preds-t1)) / var(as.numeric(t1))
+
+cca.predict
+```
+
+```{r}
+preds %>%
+as_tibble() %>%
+  bind_cols(t3, .) %>%
+  gather(year, SWE, `1982`:`2010`) %>%
+  mutate(year = as.numeric(year)) %>%
+  filter(year < 1985) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = SWE)) +
+  scale_fill_viridis_c() +
+  facet_wrap(~year) +
+  coord_quickmap()
+```
+```{r}
+prism_dat %>%
+  group_by(x, y) %>%
+  mutate(anomaly = SWE - mean(SWE)) %>%
+  ungroup %>%
+  filter(year < 1985) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = anomaly)) +
+  scale_fill_viridis_c() +
+  facet_wrap(~year) +
+  coord_quickmap()
+```
+
+
+```{r}
+test2 <- preds %>%
+as_tibble() %>%
+  bind_cols(t3, .) %>%
+  rasterFromXYZ() 
+
+plot((test2 * calc(prism, sd) + mean(prism)) - prism )
+
+```
+
+## CESM-LME Comparison
+
+```{r}
+cesm_h2osno <- preprocess('~/Downloads/b.e11.BLMTRC5CN.f19_g16.001.clm2.h1.H2OSNO.08500101-18491231.nc',
+                          var = 'H2OSNO',
+                          flip = TRUE)
+
+cesm_h2osno_ext <- preprocess('~/Downloads/b.e11.BLMTRC5CN.f19_g16.001.clm2.h1.H2OSNO.18500101-20051231.nc',
+                          var = 'H2OSNO',
+                          flip = TRUE)
+```
+
+
+This comparison suggests that CESM is underpredicting SWE because of the simplified topography. Check this by looking at the underlying topography boundary files for that simulation.
+```{r}
+surface_geop <- raster('data/consistent-topo-fv1.9x2.5_c130424.nc', 
+                       var = 'PHIS') %>%
+  rotate() %>%
+  crop(bbox, snap = 'out') %>%
+  `/`(9.80665) %>%
+  as.data.frame(na.rm = TRUE, xy = TRUE) 
+
+landfrac <- raster('data/consistent-topo-fv1.9x2.5_c130424.nc', 
+                   var = 'LANDFRAC') %>%
+  rotate() %>%
+  crop(bbox, snap = 'out')
+```
+
+```{r, echo = FALSE}
+ggplot(surface_geop) +
+  geom_raster(aes(x, y, fill = surface.geopotential)) +
+  scale_fill_viridis_c() +
+  geom_sf(data = states_wus, fill = NA, color = 'white') +
+  theme_void() +
+  ggtitle('CESM LME Topography')
+```
+
+
+```{r}
+cesm_areas <- area(cesm_h2osno) %>%
+  `*`(landfrac) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
+  rename(area = layer)
+```
+
+
+still need to account for snow fraction of grid cell? and land fraction too?
+
+```{r}
+cesm_dat <- c(cesm_h2osno, cesm_h2osno_ext) %>%
+  brick() %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = str_sub(layer, 2) %>% parse_number() %>% round) %>%
+  rename(SWE = value) %>%
+  select(-layer) %>%
+  left_join(cesm_areas, by = c('x', 'y'))
+```
+
+```{r animation_cesm, echo = FALSE, cache = TRUE}
+cesm_dat %>%
+  filter(year < 1000) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
+  geom_sf(data = states_wus, fill = NA, colour = 'white') +
+  scale_fill_viridis_c() +
+  coord_sf()+
+  theme_void() +
+  ggtitle("Simulated Snow Water Equivalent", "April 1st, {closest_state}") +
+  transition_states(year)
+```
+
 
 ## Reconstruction
 
 ```{r}
 comb_pca <- ccsm_dat %>%
   select(-area) %>%
-  filter(between(year, 1800, 1832)) %>%
+  filter(between(year, 1750, 1850)) %>%
   bind_rows(cera_dat) %>%
   snow_only() %>%
       spread(year, SWE) %>%
   remove_missing()%>%
-  gather(year, SWE, `1800`:`2010`) %>%
+  gather(year, SWE, `1750`:`2010`) %>%
   calc_pcs()
 
 comb_eigs <- get_eigs(comb_pca, ccsm)
@@ -852,7 +945,7 @@ plot_scree(comb_eigs, 9)
 ```
 
 ```{r, echo = FALSE}
-plot_eof(prism_dat, eofs_obs)
+plot_eof(prism_dat, prism_eofs)
 
 plot_eof(cera_dat, cera_eofs)
 
@@ -860,9 +953,10 @@ ccsm_dat %>%
   select(-area) %>%
     filter(between(year, 1800, 1836)) %>%
   bind_rows(cera_dat) %>%
-   plot_eof(comb_eofs)
+  remove_missing() %>%
+   plot_eof(remove_missing(comb_eofs))
 
-plot_eof(ccsm_dat, eofs_sim)
+plot_eof(ccsm_dat, sim_eofs)
 ```
 
 
