@@ -1,5 +1,5 @@
 ---
-title: "Snowpack variability in western North America over the common era"
+title: "Downscaling Snowpack variability in western North America over the common era"
 subtitle: "Models and Observations"
 author: "Nick Gauthier"
 date: "Last knit on: `r Sys.Date()`"
@@ -18,6 +18,8 @@ Analysis of simulated and observed snow water equivalent (SWE) dynamics in weste
 
 # Setup
 
+## Packages
+
 Import the packages required for this analysis.
 
 ```{r setup, message = FALSE, warning = FALSE}
@@ -26,17 +28,25 @@ library(nFactors)
 library(tidyverse) # data manipulation and visualization
 library(mgcv) # flexible nonlinear regression models
 library(furrr) # parallel processing
+library(broom) # tidying model objects
+library(mgcv)
+library(remote)
+```
+
+Plotting packages
+
+```{r}
 library(sf) # shapefiles and plotting
 library(gganimate) # animated gifs
 library(ggridges) # ridge plots
-library(broom) # tidying model objects
 ```
 
+## Geographic Data
 
 Define a study area to constrain all computaitons.
 ```{r}
-bbox <- extent(c(-125, -104, 33, 50))
-```
+bbox <- extent(c(-125, -104, 33, 49))
+  ```
 
 ```{r, echo = FALSE}
 # not shown, download state boundary files
@@ -48,10 +58,6 @@ state_names <- c('arizona', 'new mexico', 'colorado',
 states_wus <- maps::map('state', regions = state_names, 
                     fill = TRUE, plot = FALSE) %>% st_as_sf
 ```
-
-## Data
-
-### Rasters
 
 Import the snow observation data from https://nsidc.org/data/nsidc-0719.^[What's up with this warning message? long_name=CRS definition
 spatial_ref=GEOGCS["NAD83",DATUM["North_American_Datum_1983",SPHEROID["GRS 1980",6378137,298.257222101,AUTHORITY["EPSG","7019"]],AUTHORITY["EPSG","6269"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.01745329251994328,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4269"]]
@@ -101,6 +107,23 @@ prism <- list.files('data', pattern = 'SWE_Depth', full.names = TRUE) %>%
 ```
 
 ```{r}
+ccsm <- preprocess('data/snw_LImon_CCSM4_past1000_r1i1p1_085001-185012.nc', 
+                   var = 'snw', 
+                   flip = TRUE, 
+                   monthly = TRUE)
+```
+
+```{r, warning = FALSE}
+cera <- map(1:10, 
+            ~(brick('data/CERA-20C_snow.nc', varname = 'rsn', level = .) *
+                brick('data/CERA-20C_snow.nc', varname = 'sd', level = .)) %>%
+              projectRaster(ccsm)) %>%
+              reduce(`+`) %>%
+              `/`(10) %>%
+  crop(bbox)
+```
+
+```{r}
 area_obs <- raster::area(prism) %>%
     as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
   select(-layer) %>%
@@ -111,20 +134,7 @@ ccsm_areas <- raster::area(ccsm) %>%
   rename(area = layer)
 ```
 
-```{r}
-ccsm <- preprocess('data/snw_LImon_CCSM4_past1000_r1i1p1_085001-185012.nc', 
-                   var = 'snw', 
-                   flip = TRUE, 
-                   monthly = TRUE)
-```
-
-```{r}
-cera <- (brick('data/CERA-20C_snow.nc', varname = 'rsn') * 
-  brick('data/CERA-20C_snow.nc', varname = 'sd')) %>%
-  projectRaster(ccsm)
-```
-
-### Data Frames
+## Preprocessing
 
 ```{r}
 snow_only <- function(dat){
@@ -137,7 +147,6 @@ snow_only <- function(dat){
 }
 ```
 
-
 Turn all the rasters into data frames and join.
 ```{r}
 prism_dat <- prism %>%
@@ -145,7 +154,7 @@ prism_dat <- prism %>%
   mutate(year = round(parse_number(layer))) %>%
   rename(SWE = value) %>%
   select(-layer) %>%
-  left_join(area_obs) %>%
+  left_join(area_obs, by = c('x', 'y')) %>%
   snow_only()
 ```
 
@@ -168,17 +177,86 @@ ccsm_dat <- ccsm %>%
   snow_only()
 ```
 
-# Observations
+# Visualization
+
+
+What's the climatic mean April 1st SWE for the observations and simulations?
+```{r, echo = FALSE, warning = FALSE}
+library(scico)
+prism_dat %>%
+  group_by(x, y) %>%
+  summarise(SWE = mean(SWE))%>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  #scale_fill_distiller(palette = 'PuBu', direction = 1) +
+  scale_fill_scico(palette = 'davos', direction = -1) +
+  ggtitle('Observed mean April 1st SWE, 1982-2017', 'PRISM')
+```
+
+```{r}
+cera_dat %>%
+  group_by(x, y) %>%
+  summarise(SWE = mean(SWE))%>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  #scale_fill_distiller(palette = 'PuBu', direction = 1) +
+  scale_fill_scico(palette = 'davos', direction = -1) +
+  ggtitle('Simulated mean March SWE, 1900-2010', 'PRISM')
+```
+
+
+To what extent is this mistmatch due to bias or scale effects? Test by resampling the observations to the CESM LME grid.
+
+```{r, echo = FALSE}
+mean_swe_cera <- cera_dat %>%
+  filter(year >= 1982) %>%
+  group_by(x, y) %>%
+  summarise(sim = mean(SWE))
+
+prism_resamp <- prism %>%
+  subset(1:29) %>%
+  mean %>%
+  resample(ccsm) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
+  rename(obs = layer)
+
+left_join(prism_resamp, mean_swe_cera, by = c('x', 'y')) %>%
+  gather(type, SWE, 3:4) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
+  geom_sf(data = states_wus, fill = NA, color = 'white') +
+  theme_void() +
+  facet_wrap(~type) +
+    scale_fill_scico(palette = 'davos', direction = -1) +
+  ggtitle('Observed vs Simulated mean March SWE', '1982-2010')
+```
+
+
 Look at how SWE has varied over time and space.
 
 ```{r animation, echo = FALSE, warning=FALSE,cache = TRUE}
 prism_dat %>%
   ggplot() +
   geom_raster(aes(x, y, fill = SWE)) +
-  scale_fill_viridis_c() +
-  geom_sf(data = states_wus, fill = NA, color = 'white') +
+    scale_fill_scico(palette = 'davos', direction = -1) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
   theme_void() +
-  ggtitle("Snow Water Equivalent", "April 1st, {closest_state}") +
+  ggtitle("Snow Water Equivalent", "March, {closest_state}") +
+  transition_states(year)
+```
+
+```{r cera_animation, echo = FALSE, warning=FALSE,cache = TRUE}
+cera_dat %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
+    scale_fill_scico(palette = 'davos', direction = -1) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  ggtitle("Snow Water Equivalent", "March, {closest_state}") +
   transition_states(year)
 ```
 
@@ -186,9 +264,24 @@ prism_dat %>%
  prism_dat %>%
   group_by(x, y) %>%
   mutate(anomaly = SWE - mean(SWE)) %>%
-  ggplot(aes(x, y)) +
-  geom_raster(aes(fill = anomaly)) +
-  scale_fill_distiller(palette = 'RdBu', limits = c(-1850, 1850)) +
+  ggplot() +
+  geom_raster(aes(x, y, fill = anomaly)) +
+    geom_sf(data = states_wus, fill = NA, color = 'black') +
+  #scale_fill_distiller(palette = 'RdBu', limits = c(-1300, 1300)) +
+  scale_fill_scico(palette = 'broc', direction = -1, limits = c(-1300, 1300)) +
+  transition_states(year) +
+  theme_void()
+```
+
+```{r, echo = FALSE}
+ cera_dat %>%
+  group_by(x, y) %>%
+  mutate(anomaly = SWE - mean(SWE)) %>%
+  ggplot() +
+  geom_raster(aes(x, y, fill = anomaly)) +
+    geom_sf(data = states_wus, fill = NA, color = 'black') +
+  #scale_fill_distiller(palette = 'RdBu', limits = c(-1300, 1300)) +
+  scale_fill_scico(palette = 'broc', direction = -1, limits = c(-130, 130)) +
   transition_states(year) +
   theme_void()
 ```
@@ -255,12 +348,7 @@ ccsm_dat %>%
   transition_states(year)
 ```
 
-```{r}
-cesm_agg <- cesm_dat %>%
-  group_by(year) %>%
-  summarise(SWE = sum(SWE * area, na.rm = TRUE)) %>%
-  mutate(avg = zoo::rollmean(SWE, k = 100, na.pad = TRUE))
-```
+
 
 ```{r}
 ccsm_agg <- ccsm_dat %>%
@@ -269,18 +357,6 @@ ccsm_agg <- ccsm_dat %>%
   mutate(avg = zoo::rollmean(SWE, k = 100, na.pad = TRUE))
 ```
 
-```{r, echo = FALSE, warning = FALSE}
-cesm_agg %>%
-  filter(year <=1850) %>%
-ggplot(aes(year, SWE)) +
-  geom_line(alpha = .3) +
-  #geom_point(aes(color = SWE)) +
-    geom_smooth(method = 'gam', formula = y ~ s(x, bs = "cs", k = 30)) +
-  geom_line(aes(y = avg), size = 1.2) +
-  scale_color_viridis_c(guide = FALSE) +
-  theme_minimal() +
-  ggtitle('Simulated SWE over the Last Millennium')
-```
 
 ```{r, echo = FALSE, warning = FALSE}
 ggplot(ccsm_agg, aes(year, SWE)) +
@@ -294,20 +370,14 @@ ggplot(ccsm_agg, aes(year, SWE)) +
 ```
 
 So there's a clear bias here. As we see below, the mean of the observations is well higher than it should be. Looks like the simulation underpredicts snow -- likely because of all the small-scale topographic influences that CESM can't resolve.
-```{r, echo = FALSE, fig.width = 3.5, fig.height = 8}
+
+```{r}
 mod_avg <- obs_agg %>% 
   summarise(SWE = mean(SWE)) %>%
   pull(SWE)
-
-cesm_agg %>%
-  mutate(period = floor((year / 30)) * 30) %>%
-  ggplot(aes(SWE, period, group = period)) +
-  geom_density_ridges(fill = 'lightgrey') +
-  #ggridges::geom_density_ridges_gradient(stat = 'density', scale = 1.5)+
-  #scale_fill_viridis_c(guide = F) +
-  geom_vline(xintercept= c(mod_avg), linetype = 2) +
-  ggridges::theme_ridges(grid = FALSE, center_axis_labels = TRUE)
 ```
+
+
 
 ```{r, echo = FALSE, fig.width = 3.5, fig.height = 8}
 ccsm_agg %>%
@@ -323,58 +393,8 @@ ccsm_agg %>%
 
 Let's compare the observations and simulation directly.
 
-What's the climatic mean April 1st SWE for the observations and simulations?
-```{r, echo = FALSE, warning = FALSE}
-prism_dat %>%
-  filter(year <= 2005) %>%
-  group_by(x, y) %>%
-  summarise(SWE = mean(SWE))%>%
-  ggplot() +
-  geom_raster(aes(x, y, fill = SWE)) +
-  geom_sf(data = states_wus, fill = NA, color = 'white') +
-  theme_void() +
-  scale_fill_viridis_c() +
-  ggtitle('Observed mean April 1st SWE, 1982-2005', 'CESM LME extension')
-```
 
-
-To what extent is this mistmatch due to bias or scale effects? Test by resampling the observations to the CESM LME grid.
-
-```{r, echo = FALSE}
-mean_swe_ccsm_ext <- ccsm_dat %>%
-  #filter(year >= 1982) %>%
-  group_by(x, y) %>%
-  summarise(sim = mean(SWE))
-
-prism_resamp <- prism %>%
-  subset(1:24) %>% 
-  mean %>%
-  resample(ccsm) %>%
-  as.data.frame(xy = TRUE, na.rm = TRUE) %>%
-  rename(obs = layer)
-
-left_join(prism_resamp, mean_swe_ccsm_ext, by = c('x', 'y')) %>%
-  gather(type, SWE, 3:4) %>%
-ggplot() +
-  geom_raster(aes(x, y, fill = SWE)) +
-  geom_sf(data = states_wus, fill = NA, color = 'white') +
-  theme_void() +
-  facet_wrap(~type) +
-  scale_fill_viridis_c() +
-  ggtitle('Observed vs Simulated mean April 1st SWE', '1982-2005')
-```
-
-
-```{r}
-ccsm %>% resample(cesm_h2osno_ext) %>% mean %>% plot
-```
-
-
-Might be interesting to look at snow centroid date too down the road. Spatial patterns notwithstanding, maybe the aggregate temporal patterns are still recoverable?
-
-
-
-## PCA
+# PCA
 
 ```{r}
 calc_pcs <- function(dat, scale = TRUE){
@@ -382,8 +402,30 @@ calc_pcs <- function(dat, scale = TRUE){
     spread(year, SWE) %>%
     select(-x, -y) %>%
     t() %>%
-    prcomp(scale. = scale)
+    prcomp(scale. = FALSE)
 }
+```
+
+```{r}
+cera %>% getValues()
+```
+
+
+```{r}
+ recons <- lapply(seq(nlayers(x)), function(i) {
+        rowSums(t(as.matrix(pca$loadings[, 1:k])[i, ] * t(pca$scores[, 
+            1:k]))) + pca$center[i]
+ })
+
+prism_pca$center
+library(telefit)
+cca.predict
+
+eof
+library(wql)
+eof
+transformeR::gridFromPCA
+library(downscaleR)
 ```
 
 
@@ -523,36 +565,42 @@ plot_scree(sim_eigs, 9)
 ## EOFs
 
 ```{r}
-get_eofs <- function(pca_object, eigenvalues, k){
-  pca_object %>% # calculate unrotated EOFs
+get_eofs <- function(dat, pca_object, eigenvalues, k){
+  eofs <- pca_object %>% # calculate unrotated EOFs
     tidy(matrix = 'variables') %>%
     filter(PC <= k) %>%
     left_join(eigenvalues[1:2], by = 'PC') %>%
-    mutate(eof = value * std.dev,
-           PC = as.character(PC)) %>%
-    select(-std.dev,-value) 
-}
-```
-
-```{r calc_eofs}
-prism_eofs <- get_eofs(prism_pca, prism_eigs, 9)
-sim_eofs <- get_eofs(sim_pca, sim_eigs, 9)
-cera_eofs <- get_eofs(cera_pca, cera_eigs, 9)
-```
-
-
-```{r, echo = FALSE}
-plot_eof <- function(dat, eofs){
+    mutate(weight = value * std.dev,
+           EOF = as.character(PC)) %>%
+    select(-std.dev,-value, -PC) 
+  
   dat %>%
   spread(year, SWE) %>%
   mutate(column = 1:n()) %>%
   select(x, y, column) %>%
-  full_join(eofs) %>%
+  full_join(eofs, by = 'column') %>%
+      select(-column)
+}
+
+prism_eigs
+```
+
+```{r calc_eofs}
+prism_eofs <- get_eofs(prism_dat, prism_pca, prism_eigs, 9)
+sim_eofs <- get_eofs(ccsm_dat, sim_pca, sim_eigs, 9)
+cera_eofs <- get_eofs(cera_dat, cera_pca, cera_eigs, 9)
+```
+
+
+```{r, echo = FALSE}
+plot_eof <- function(eofs){
+  eofs %>%
+    mutate(EOF = paste0('EOF', EOF)) %>%
   ggplot() +
-  geom_raster(aes(x, y, fill = eof)) +
+  geom_raster(aes(x, y, fill = weight)) +
   geom_sf(data = states_wus, fill = NA, color = 'black') +
-  facet_wrap(~PC) +
-  scale_fill_distiller(palette = 'RdBu', limits = c(-1, 1)) +
+  facet_wrap(~EOF) +
+  scale_fill_scico(palette = 'broc', direction = -1, limits = c(-1, 1)) +
   theme_void()+
   ggtitle('Observed April 1st SWE EOFS')
 }
@@ -560,9 +608,9 @@ plot_eof <- function(dat, eofs){
 
 
 ```{r}
-plot_eof(prism_dat, prism_eofs)
-plot_eof(cera_dat, cera_eofs)
-plot_eof(ccsm_dat, sim_eofs)
+plot_eof(prism_eofs)
+plot_eof(cera_eofs)
+plot_eof(sim_eofs)
 ```
 
 So they're the same! next do a Canonical Correlation Analysis
@@ -575,32 +623,108 @@ So they're the same! next do a Canonical Correlation Analysis
 
 ```{r}
 get_pcs <- function(pc_object, k){
-   tidy(pc_object) %>%
-  mutate(water_year = as.numeric(as.character(row))) %>%
-  filter(PC <= k) %>%
-  mutate(PC = paste0('PC', PC)) %>%
-  spread(PC, value)
+  tidy(pc_object, 'samples') %>%
+    mutate(year = as.numeric(as.character(row))) %>%
+    select(-row) %>%
+    filter(PC <= k) %>%
+    mutate(PC = as.character(PC)) %>%
+    rename(amplitude = value)
 }
 
-pcs_prism <- get_pcs(prism_pca, 9)
+pcs_prism <- get_pcs(prism_pca, 36)
 pcs_cera <- get_pcs(cera_pca, 9)
+
+tidy(prism_pca, 'samples')
 ```
 
 
-
-
 ```{r, echo = FALSE}
-pcs_prism %>%
-  gather(PC, value, PC1:PC9) %>%
-ggplot(aes(water_year, value)) +
+pcs_prism %>% 
+  mutate(PC = paste0('PC', PC)) %>% 
+ggplot(aes(year, amplitude)) +
   geom_line() +
   facet_wrap(~PC)
 
 pcs_cera %>%
-  gather(PC, value, PC1:PC9) %>%
-ggplot(aes(water_year, value)) +
+  mutate(PC = paste0('PC', PC)) %>% 
+ggplot(aes(year, amplitude)) +
   geom_line() +
   facet_wrap(~PC)
+```
+
+```{r}
+prism_scaler <- prism_dat %>%
+  spread(year, SWE) %>%
+  select(x, y) %>%
+  mutate(avg = prism_pca$center, sdev = prism_pca$scale)
+
+prism_recon <- pcs_prism %>%
+  spread(year, amplitude) %>%
+  left_join(prism_eofs, ., by = c('EOF' = 'PC')) %>%
+  gather(year, amplitude, `1982`:`2017`) %>% ## change dates for cera
+  mutate(SWE = weight * amplitude,
+         year = as.numeric(year)) %>%
+  group_by(x, y, year) %>%
+  summarise(anomaly = sum(SWE)) %>%
+  left_join(prism_scaler) %>%
+  mutate(SWE =  anomaly * sdev + avg)
+```
+
+```{r}
+prism_pca$center
+
+prism_mean %>%
+  ungroup %>%
+  mutate(test = prism_pca$center)
+
+plot(prism_mean$SWE_mean, prism_pca$center)
+
+
+
+prism_pca$scale
+
+```
+
+
+```{r}
+prism_recon %>%
+filter(year <= 1987) %>% 
+ # mutate(SWE = if_else(SWE < 0, 0, SWE)) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  facet_wrap(~year) +
+  scale_fill_scico(palette = 'davos', direction = -1) +
+  ggtitle('Observed mean April 1st SWE, 1982-2017', 'PRISM')
+
+prism_dat %>%
+    group_by(x, y) %>%
+  mutate(SWE_mean = mean(SWE),
+         anomaly = SWE - SWE_mean) %>%
+filter(year <= 1987) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = SWE)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  facet_wrap(~year) +
+  scale_fill_scico(palette = 'davos', direction = -1) +
+  ggtitle('Observed mean April 1st SWE, 1982-2017', 'PRISM')
+```
+
+
+```{r}
+prism_recon %>%
+  left_join(prism_dat, by = c('x', 'y', 'year')) %>%
+  mutate(error = SWE.x - SWE.y) %>%
+filter(year <= 1987) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = error)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  facet_wrap(~year) +
+  scale_fill_scico(palette = 'vik', direction = -1) +
+  ggtitle('Observed mean April 1st SWE, 1982-2017', 'PRISM')
 ```
 
 ```{r}
@@ -915,6 +1039,37 @@ cesm_dat %>%
   transition_states(year)
 ```
 
+
+```{r}
+cesm_agg <- cesm_dat %>%
+  group_by(year) %>%
+  summarise(SWE = sum(SWE * area, na.rm = TRUE)) %>%
+  mutate(avg = zoo::rollmean(SWE, k = 100, na.pad = TRUE))
+```
+
+```{r, echo = FALSE, warning = FALSE}
+cesm_agg %>%
+  filter(year <=1850) %>%
+ggplot(aes(year, SWE)) +
+  geom_line(alpha = .3) +
+  #geom_point(aes(color = SWE)) +
+    geom_smooth(method = 'gam', formula = y ~ s(x, bs = "cs", k = 30)) +
+  geom_line(aes(y = avg), size = 1.2) +
+  scale_color_viridis_c(guide = FALSE) +
+  theme_minimal() +
+  ggtitle('Simulated SWE over the Last Millennium')
+```
+
+```{r, echo = FALSE, fig.width = 3.5, fig.height = 8}
+cesm_agg %>%
+  mutate(period = floor((year / 30)) * 30) %>%
+  ggplot(aes(SWE, period, group = period)) +
+  geom_density_ridges(fill = 'lightgrey') +
+  #ggridges::geom_density_ridges_gradient(stat = 'density', scale = 1.5)+
+  #scale_fill_viridis_c(guide = F) +
+  geom_vline(xintercept= c(mod_avg), linetype = 2) +
+  ggridges::theme_ridges(grid = FALSE, center_axis_labels = TRUE)
+```
 
 ## Reconstruction
 
