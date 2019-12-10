@@ -39,6 +39,7 @@ Plotting packages
 library(sf) # shapefiles and plotting
 library(gganimate) # animated gifs
 library(ggridges) # ridge plots
+library(scico)
 ```
 
 ## Geographic Data
@@ -46,7 +47,7 @@ library(ggridges) # ridge plots
 Define a study area to constrain all computaitons.
 ```{r}
 bbox <- extent(c(-125, -104, 33, 49))
-  ```
+```
 
 ```{r, echo = FALSE}
 # not shown, download state boundary files
@@ -177,12 +178,11 @@ ccsm_dat <- ccsm %>%
   snow_only()
 ```
 
-# Visualization
 
+# Visualization
 
 What's the climatic mean April 1st SWE for the observations and simulations?
 ```{r, echo = FALSE, warning = FALSE}
-library(scico)
 prism_dat %>%
   group_by(x, y) %>%
   summarise(SWE = mean(SWE))%>%
@@ -228,7 +228,7 @@ left_join(prism_resamp, mean_swe_cera, by = c('x', 'y')) %>%
   gather(type, SWE, 3:4) %>%
 ggplot() +
   geom_raster(aes(x, y, fill = SWE)) +
-  geom_sf(data = states_wus, fill = NA, color = 'white') +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
   theme_void() +
   facet_wrap(~type) +
     scale_fill_scico(palette = 'davos', direction = -1) +
@@ -407,29 +407,6 @@ calc_pcs <- function(dat, scale = TRUE){
 ```
 
 ```{r}
-cera %>% getValues()
-```
-
-
-```{r}
- recons <- lapply(seq(nlayers(x)), function(i) {
-        rowSums(t(as.matrix(pca$loadings[, 1:k])[i, ] * t(pca$scores[, 
-            1:k]))) + pca$center[i]
- })
-
-prism_pca$center
-library(telefit)
-cca.predict
-
-eof
-library(wql)
-eof
-transformeR::gridFromPCA
-library(downscaleR)
-```
-
-
-```{r}
 prism_pca <- prism_dat %>%
   select(-area) %>%
   calc_pcs()
@@ -440,7 +417,6 @@ sim_pca <- ccsm_dat %>%
 
 cera_pca <- calc_pcs(cera_dat)
 ```
-
 
 ```{r}
 area_weight <- function(x){
@@ -509,35 +485,6 @@ sim_eigs$eigenvalues %>%
 
 
 ```{r}
-test2 <- c(3.532, 1.985, .344, .074, .038, .027)
-
-eigen_test <- function(lambdas, k, M, n){
-nrank<- min(n - 1, M)
-
-kstar <- M - k + 1
-nk <- n - k + 1
-mu <- (sqrt(nk - 0.5) + sqrt(kstar - 0.5))^2
-sigma <- sqrt(mu) * (1 / sqrt(nk - 0.5) + 1 / sqrt(kstar - 0.5)) ^ (1/3)
-alpha <- 46.4
-beta <- (0.186 * sigma) / max(nk, kstar)
-zeta <- (mu - 9.85 * sigma) / max(nk, kstar)
-lambda_star <- lambdas[k] / ((1 / (nrank - k + 1)) * sum(lambdas[k:nrank]))
-
-
- (1- pgamma(((lambda_star - zeta) / beta), 46.4)) < 0.05
-}
-
-
-map_lgl(1:6, ~eigen_test(test2, k = ., M = 6, n = 31))
-
-
-map_lgl(1:36, ~eigen_test(prism_eigs$eigenvalues, k = ., M = 17783, n = 36))
-
-map_lgl(1:275, ~eigen_test(sim_eigs$eigenvalues, k = ., M = 276, n = 1001))
-```
-
-
-```{r}
 plot_scree <- function(eigs, k){
   eigs %>% 
     mutate(separated = if_else(is.na(lag(low)), TRUE, hi < lag(low)),
@@ -556,8 +503,8 @@ plot_scree <- function(eigs, k){
 ```
 
 ```{r plot_variance_obs, echo = FALSE}
-plot_scree(prism_eigs, 9)
-plot_scree(cera_eigs, 9)
+plot_scree(prism_eigs, 7)
+plot_scree(cera_eigs, 7)
 plot_scree(sim_eigs, 9)
 ```
 
@@ -566,13 +513,13 @@ plot_scree(sim_eigs, 9)
 
 ```{r}
 get_eofs <- function(dat, pca_object, eigenvalues, k){
-  eofs <- pca_object %>% # calculate unrotated EOFs
+  eofs <- pca_object %>% 
     tidy(matrix = 'variables') %>%
     filter(PC <= k) %>%
     left_join(eigenvalues[1:2], by = 'PC') %>%
     mutate(weight = value * std.dev,
            EOF = as.character(PC)) %>%
-    select(-std.dev,-value, -PC) 
+    select(-std.dev, -PC) 
   
   dat %>%
   spread(year, SWE) %>%
@@ -581,14 +528,12 @@ get_eofs <- function(dat, pca_object, eigenvalues, k){
   full_join(eofs, by = 'column') %>%
       select(-column)
 }
-
-prism_eigs
 ```
 
 ```{r calc_eofs}
-prism_eofs <- get_eofs(prism_dat, prism_pca, prism_eigs, 9)
-sim_eofs <- get_eofs(ccsm_dat, sim_pca, sim_eigs, 9)
-cera_eofs <- get_eofs(cera_dat, cera_pca, cera_eigs, 9)
+prism_eofs <- get_eofs(prism_dat, prism_pca, prism_eigs, 7)
+sim_eofs <- get_eofs(ccsm_dat, sim_pca, sim_eigs, 7)
+cera_eofs <- get_eofs(cera_dat, cera_pca, cera_eigs, 7)
 ```
 
 
@@ -600,9 +545,9 @@ plot_eof <- function(eofs){
   geom_raster(aes(x, y, fill = weight)) +
   geom_sf(data = states_wus, fill = NA, color = 'black') +
   facet_wrap(~EOF) +
-  scale_fill_scico(palette = 'broc', direction = -1, limits = c(-1, 1)) +
+  scale_fill_scico(palette = 'broc', direction = -1, limits = c(-1, 1) * max(abs(eofs$weight))) +
   theme_void()+
-  ggtitle('Observed April 1st SWE EOFS')
+  ggtitle('Observed March SWE EOFS')
 }
 ```
 
@@ -617,10 +562,6 @@ So they're the same! next do a Canonical Correlation Analysis
 
 # Coupled Pattern Analysis
 
-
-## CCA
-
-
 ```{r}
 get_pcs <- function(pc_object, k){
   tidy(pc_object, 'samples') %>%
@@ -631,12 +572,9 @@ get_pcs <- function(pc_object, k){
     rename(amplitude = value)
 }
 
-pcs_prism <- get_pcs(prism_pca, 36)
-pcs_cera <- get_pcs(cera_pca, 9)
-
-tidy(prism_pca, 'samples')
+pcs_prism <- get_pcs(prism_pca, 7)
+pcs_cera <- get_pcs(cera_pca, 7)
 ```
-
 
 ```{r, echo = FALSE}
 pcs_prism %>% 
@@ -656,59 +594,44 @@ ggplot(aes(year, amplitude)) +
 prism_scaler <- prism_dat %>%
   spread(year, SWE) %>%
   select(x, y) %>%
-  mutate(avg = prism_pca$center, sdev = prism_pca$scale)
+  mutate(avg = prism_pca$center)#, sdev = prism_pca$scale)
 
 prism_recon <- pcs_prism %>%
   spread(year, amplitude) %>%
   left_join(prism_eofs, ., by = c('EOF' = 'PC')) %>%
   gather(year, amplitude, `1982`:`2017`) %>% ## change dates for cera
-  mutate(SWE = weight * amplitude,
+  mutate(SWE = value * amplitude,
          year = as.numeric(year)) %>%
   group_by(x, y, year) %>%
   summarise(anomaly = sum(SWE)) %>%
   left_join(prism_scaler) %>%
-  mutate(SWE =  anomaly * sdev + avg)
-```
-
-```{r}
-prism_pca$center
-
-prism_mean %>%
-  ungroup %>%
-  mutate(test = prism_pca$center)
-
-plot(prism_mean$SWE_mean, prism_pca$center)
-
-
-
-prism_pca$scale
-
+  mutate(SWE =  anomaly + avg)
 ```
 
 
 ```{r}
 prism_recon %>%
 filter(year <= 1987) %>% 
- # mutate(SWE = if_else(SWE < 0, 0, SWE)) %>%
+  mutate(SWE = if_else(SWE < 0, 0, SWE)) %>%
 ggplot() +
-  geom_raster(aes(x, y, fill = SWE)) +
+  geom_raster(aes(x, y, fill = anomaly)) +
   geom_sf(data = states_wus, fill = NA, color = 'black') +
   theme_void() +
   facet_wrap(~year) +
-  scale_fill_scico(palette = 'davos', direction = -1) +
+  scale_fill_scico(palette = 'vik', direction = -1, limits = c(-1300, 1300)) +
   ggtitle('Observed mean April 1st SWE, 1982-2017', 'PRISM')
 
 prism_dat %>%
     group_by(x, y) %>%
   mutate(SWE_mean = mean(SWE),
-         anomaly = SWE - SWE_mean) %>%
+         anomaly = SWE - SWE_mean) %>% 
 filter(year <= 1987) %>%
 ggplot() +
-  geom_raster(aes(x, y, fill = SWE)) +
+  geom_raster(aes(x, y, fill = anomaly)) +
   geom_sf(data = states_wus, fill = NA, color = 'black') +
   theme_void() +
   facet_wrap(~year) +
-  scale_fill_scico(palette = 'davos', direction = -1) +
+  scale_fill_scico(palette = 'vik', direction = -1, limits = c(-1300, 1300)) +
   ggtitle('Observed mean April 1st SWE, 1982-2017', 'PRISM')
 ```
 
@@ -723,23 +646,39 @@ ggplot() +
   geom_sf(data = states_wus, fill = NA, color = 'black') +
   theme_void() +
   facet_wrap(~year) +
-  scale_fill_scico(palette = 'vik', direction = -1) +
+  scale_fill_scico(palette = 'vik', direction = -1, limits = c(-450, 450)) +
   ggtitle('Observed mean April 1st SWE, 1982-2017', 'PRISM')
 ```
 
+## GAM
+
 ```{r}
-library(mgcv)
 
-t2 <- pcs_cera %>%
-  filter(water_year >= 1982) %>% 
-  select(water_year, PC1:PC9)
+predictors <- pcs_cera %>%
+  filter(year >= 1982) %>% 
+    mutate(PC = paste0('PC', PC)) %>% 
+  spread(PC, amplitude) %>%
+  select(year, PC1:PC7)
 
-m1 <- pcs_prism %>%
-  filter(water_year <= 2010) %>%
-  select(PC5) %>%
-  rename(target = PC5) %>%
-  bind_cols(t2) %>%
-  gam(target ~ s(PC1, k = 4) + s(PC2, k =5) + s(PC3, k = 4) + s(PC4, k = 4) + s(PC5, k = 4) + s(PC6, k = 4) + s(PC7, k = 4) + s(PC8, k = 4) + s(PC9, k = 4), data = ., method = 'REML', select = TRUE)
+pcs_prism %>%
+  filter(year <= 2010) %>%
+    mutate(PC = paste0('PC', PC)) %>% 
+  left_join(predictors) %>%
+  group_by(PC) %>%
+  nest() %>%
+  mutate(mod = map(data, ~gam(amplitude ~ s(year, k = 4) +
+                                s(PC1, k = 4) + 
+                                s(PC2, k =5) + 
+                                s(PC3, k = 4) + 
+                                s(PC4, k = 4) + 
+                                s(PC5, k = 4) + 
+                                s(PC6, k = 4) + 
+                                s(PC7, k = 4), 
+                              data = ., 
+                              method = 'REML', 
+                              select = TRUE))) %>%
+  mutate(r2 = map_dbl(mod, ~summary(.)$r.sq))
+  
   
 
 plot(m1)
@@ -747,6 +686,25 @@ summary(m1)
 gam.check(m1)
 ```
 
+Looks like pc 6 in the prism data may represent a trend ... r2 of .36 without year term, .89 with it!
+this seems likely, year is selected out of the model for most of the other pcs, but shows a strong negative correlation in pc 6
+
+
+```{r}
+pred_test <- pcs_cera %>%
+  filter(year >= 1982) %>%
+      mutate(PC = paste0('PC', PC)) %>% 
+  spread(PC, amplitude) %>%
+  predict(m1, .)
+pcs_prism %>%
+  filter(year <=2010) %>%
+  filter(PC == "1") %>%
+  ggplot(aes(year, amplitude)) +
+  geom_line() +
+  geom_line(y = pred_test, color = 'red')
+```
+
+## CCA
 
 ```{r}
 t1 <- pcs_prism %>%
