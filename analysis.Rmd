@@ -39,7 +39,7 @@ Plotting packages
 library(sf) # shapefiles and plotting
 library(gganimate) # animated gifs
 library(ggridges) # ridge plots
-library(scico)
+library(scico) # color palettes
 ```
 
 ## Geographic Data
@@ -390,10 +390,6 @@ ccsm_agg %>%
   ggridges::theme_ridges(grid = FALSE, center_axis_labels = TRUE)
 ```
 
-
-Let's compare the observations and simulation directly.
-
-
 # PCA
 
 ```{r}
@@ -530,8 +526,9 @@ get_eofs <- function(dat, pca_object, eigenvalues, k){
 }
 ```
 
+
 ```{r calc_eofs}
-prism_eofs <- get_eofs(prism_dat, prism_pca, prism_eigs, 4)
+prism_eofs <- get_eofs(prism_dat, prism_pca, prism_eigs, 7)
 sim_eofs <- get_eofs(ccsm_dat, sim_pca, sim_eigs, 7)
 cera_eofs <- get_eofs(cera_dat, cera_pca, cera_eigs, 7)
 ```
@@ -572,7 +569,7 @@ get_pcs <- function(pc_object, k){
     rename(amplitude = value)
 }
 
-pcs_prism <- get_pcs(prism_pca, 4)
+pcs_prism <- get_pcs(prism_pca, 7)
 pcs_cera <- get_pcs(cera_pca, 7)
 ```
 
@@ -792,7 +789,7 @@ prism_can <- prism_eofs %>%
   select(-x, -y) %>%
   as.matrix() %>%
   `%*%`(can_cor$xcoef) %>%
-  `colnames<-`(paste0('PC', 1:4)) %>%
+  `colnames<-`(paste0('PC', 1:7)) %>%
   as_tibble()
 ```
 
@@ -833,7 +830,7 @@ can_cor$cor %>% c() %>% diag()
 
 can_cor$ycoef
 
-CCP::p.asym(can_cor$cor,N = 29, p = 4, q = 7)
+#CCP::p.asym(can_cor$cor,N = 29, p = 4, q = 7)
 ```
 
 ```{r}
@@ -972,58 +969,170 @@ walk(1:6, ~plot(telecon, y = ., show.bp = TRUE))
 predict(telecon, eot1) %>% .[[1]] %>% `+`(mean(prism)) %>% plot
 ```
 
-```{r}
-t7 <- prism_dat %>%
-  select(-area) %>%
-  filter(year <= 2010) %>%
-  spread(year, SWE) %>%
-  rasterFromXYZ()
-(predict(telecon, eot1) + mean(t7) - t7) %>% plot
 
-
-
-```
 
 
 # Validation
 
 
 ```{r}
-preds %>%
-as_tibble() %>%
+anomaly_dat <- prism_dat %>%
+  filter( year <= 2010) %>% # important to make sure everything's calculated on the same time scale, may be best to do this further up?
+  group_by(x, y) %>%
+  mutate(swe_mean = mean(SWE),
+         swe_sd = sd(SWE, na.rm = TRUE),
+         anomaly = SWE - swe_mean) %>%
+  ungroup()
+
+tele_dat <- tele.preds %>%
+  as_tibble() %>%
   bind_cols(t3, .) %>%
-  gather(year, SWE, `1982`:`2010`) %>%
+  gather(year, tele_pred, `1982`:`2010`) %>%
   mutate(year = as.numeric(year)) %>%
+  left_join(anomaly_dat)  %>%
+  mutate(swe_pred = tele_pred * swe_sd + swe_mean,
+         res = swe_pred - SWE) 
+```
+
+```{r, echo = FALSE}
+tele_dat %>%
   filter(year < 1985) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = tele_pred)) +
+  scale_fill_viridis_c() +
+  facet_wrap(~year) +
+  coord_quickmap()
+
+tele_dat %>%
+  filter(year < 1985) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = anomaly)) +
+  scale_fill_distiller(palette = 'RdBu') +
+  facet_wrap(~year) +
+  coord_quickmap()
+```
+
+```{r, echo = FALSE}
+tele_dat %>%
+  filter(year == 1985) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = swe_mean)) +
+  scale_fill_viridis_c() +
+  facet_wrap(~year) +
+  coord_quickmap()
+
+tele_dat %>%
+  filter(year == 1985) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = swe_sd)) +
+  scale_fill_viridis_c() +
+  facet_wrap(~year) +
+  coord_quickmap()
+```
+
+```{r}
+plot(mean(prism));plot(calc(prism, sd))
+```
+
+```{r}
+tele_dat %>%
+  mutate(test = tele_pred * swe_sd + swe_mean) %>%
+    filter(year == 1985) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = test)) +
+  scale_fill_viridis_c() +
+  facet_wrap(~year) +
+  coord_quickmap()
+
+tele_dat %>%
+  mutate(test = tele_pred * swe_sd + swe_mean) %>%
+    filter(year == 1985) %>%
   ggplot(aes(x, y)) +
   geom_raster(aes(fill = SWE)) +
   scale_fill_viridis_c() +
   facet_wrap(~year) +
   coord_quickmap()
 ```
+
 ```{r}
-prism_dat %>%
-  group_by(x, y) %>%
-  mutate(anomaly = SWE - mean(SWE)) %>%
-  ungroup %>%
-  filter(year < 1985) %>%
+tele_dat %>%
+  mutate(swe_pred = tele_pred * swe_sd + swe_mean,
+         error = swe_pred - SWE) %>%
+      filter(year < 1985) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = error)) +
+  scale_fill_distiller(palette = 'RdBu') +
+  facet_wrap(~year) +
+  coord_quickmap()
+```
+
+```{r}
+t7 <- prism_dat %>%
+  select(-area) %>%
+  filter(year <= 2010) %>%
+  spread(year, SWE) %>%
+  rasterFromXYZ()
+
+eot_rmse <- (predict(telecon, eot1) + mean(t7) - t7)^2 %>%
+  cellStats(stat = 'mean') %>%
+  sqrt()
+
+cca_rmse <- tele_dat %>%
+  mutate(swe_pred = tele_pred * swe_sd + swe_mean,
+         error = swe_pred - SWE) %>% 
+  group_by(year) %>%
+  summarise(rmse = sqrt(mean(error ^ 2))) 
+
+gam_rmse <- gam_recon %>%
+  left_join(prism_dat, by = c('x', 'y', 'year')) %>%
+  mutate(error = SWE.x - SWE.y) %>%
+  group_by(year) %>%
+  summarise(rmse = sqrt(mean(error ^ 2))) 
+
+left_join(gam_rmse, cca_rmse, by = 'year') %>%
+  mutate(eot_rmse = eot_rmse) %>%
+  gather(method, rmse, rmse.x:eot_rmse) %>%
+  ggplot(aes(year, rmse)) +
+  geom_line(aes(color = method))
+```
+
+So the gam is in part effective here becuase it resolves recent snow droughts ... I wonder if this is a global warming trend?
+```{r}
+tele_dat %>%
+  filter(year == 2005 ) %>%
   ggplot(aes(x, y)) +
   geom_raster(aes(fill = anomaly)) +
-  scale_fill_viridis_c() +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-1100, 1100)) +
   facet_wrap(~year) +
   coord_quickmap()
 ```
 
 
+
+
+
 ```{r}
-test2 <- preds %>%
+test2 <- tele.preds %>%
 as_tibble() %>%
   bind_cols(t3, .) %>%
   rasterFromXYZ() 
 
-plot((test2 * calc(prism, sd) + mean(prism)) - prism )
-
+plot(((test2 * calc(prism, sd) + mean(prism)) - prism )[[24]])
 ```
+
+```{r}
+plot(mean(prism) - prism)
+mean(prism) - prism
+
+tele.preds %>%
+  as.tibble() %>%
+  bind_cols(t3, .)
+```
+
+```{r}
+knitr::knit_exit()
+```
+
 
 ## CESM-LME Comparison
 
@@ -1152,7 +1261,7 @@ plotnScree(nScree(comb_eigs$eigenvalues))
 comb_eofs <- get_eofs(comb_pca, comb_eigs, 9)
 ```
 
-```{r plot_variance_obs, echo = FALSE}
+```{r plot_var, echo = FALSE}
 plot_scree(comb_eigs, 9)
 ```
 
