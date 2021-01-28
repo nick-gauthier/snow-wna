@@ -1,0 +1,264 @@
+---
+title: "Snow in the Last PMIP-3 Last Millennium "
+output: html_notebook
+---
+
+```{r}
+library(raster)
+library(stars)
+#install.packages('../tidyEOF_0.1.0.tar.gz', repos = NULL, type = 'source')
+library(tidyEOF)
+library(tidyverse)
+library(scico)
+```
+
+Import state data for plotting.
+```{r}
+bbox <- extent(c(-125, -102, 31, 49))
+
+state_names <- c('arizona', 'new mexico', 'colorado', 
+                 'california', 'utah', 'nevada', 
+                 'oregon', 'washington', 'idaho',
+                 'wyoming', 'montana')
+
+states_wus <- maps::map('state', regions = state_names, 
+                    fill = TRUE, plot = FALSE) %>% 
+  st_as_sf()
+```
+
+Write a function to prerpocess the data.
+
+```{r}
+preprocess <- function(x, var, bbox, flip = FALSE, regrid = FALSE, daily = FALSE) {
+  maps <- brick(x, varname = var)
+
+  indices <- getZ(maps) %>%
+    str_detect('-03-')%>%
+    which()
+
+  raster::subset(maps, indices) %>%
+    {if(flip) rotate(.) else .} %>%
+    raster::crop(bbox, snap = 'out') %>% # snap = out for coarser grids
+    {if(daily) mean(.) else .} %>% # if a file is one year of daily values
+    {if(regrid) aggregate(., fact = 2) else .} # resample to lower res to speed up analysis
+}
+```
+
+
+Read in and preprocess the ensemble. The MRI-CGCM3 simulation is in two parts because its resolution is so high. Read it in first, combine the two layers, and use as a reference to resammple the other ensemble members.
+
+```{r}
+mri <- c('data/snw_LImon_MRI-CGCM3_past1000_r1i1p1_085001-134912.nc',
+  'data/snw_LImon_MRI-CGCM3_past1000_r1i1p1_135001-184912.nc') %>%
+  map(preprocess, var = 'snw', bbox, flip = TRUE) %>%
+  brick() %>%
+  mask(., all(near(., 0)), maskvalue = 1)
+
+rasts <- c('data/snw_LImon_MIROC-ESM_past1000_r1i1p1_085001-184912.nc',
+  'data/snw_LImon_HadCM3_past1000_r1i1p1_085001-185012.nc',
+  'data/snw_LImon_MPI-ESM-P_past1000_r1i1p1_085001-184912.nc',
+  'data/snw_LImon_CCSM4_past1000_r1i1p1_085001-185012.nc') %>%
+  map(preprocess, var = 'snw', bbox, flip = TRUE) %>%
+  map(resample, mri) %>%
+  map(~mask(., all(near(., 0)), maskvalue = 1)) %>%
+  map(mask, mri[[1]])
+
+rasts[[5]] <- mri
+
+rasts %>% map(mean) %>% walk(plot)
+```
+
+
+```{r}
+prep <- function(x) {
+  x %>%
+    as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = round(parse_number(layer))) %>%
+  rename(SWE = value) %>%
+  dplyr::select(-layer)
+}
+
+dat <- map(rasts, prep)
+
+patterns <- map(dat, get_patterns, k = 6)
+
+get_corrs2 <- function(dat, patterns) { # should be able to take arbitrary number of amps rather than first 4
+  amps <- patterns$amplitudes %>%
+    spread(PC, amplitude, sep ='')
+
+  dat %>%
+    group_by(x, y) %>%
+    nest %>%
+    mutate(corrs = map(data,  ~inner_join(., amps, by = 'year') %>%
+                         summarise(PC1 = cor(value, PC1),
+                                   PC2 = cor(value, PC2),
+                                   PC3 = cor(value, PC3),
+                                   PC4 = cor(value, PC4),
+                                   PC5 = cor(value, PC5),
+                                   PC6 = cor(value, PC6)))) %>%
+    select(-data) %>%
+    unnest(corrs)
+}
+
+corrs <- dat %>%
+  map( ~rename(., value = SWE)) %>%
+  map2(patterns, get_corrs2)
+
+corrs %>%
+  bind_rows(.id = 'model') %>%
+  gather(PC, value, PC1:PC6) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+        geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_grid(model~PC) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void()
+```
+```{r}
+ dat %>%
+  walk(~get_anomalies(.) %>%
+  get_pcs() %>%
+  get_eigenvalues() %>% 
+  plot_scree(k = 6, kmax = 10) +
+  scale_color_brewer(palette = 'Spectral'))
+
+plot_sc
+```
+
+
+to do teleconnections, need the sst layers from the models
+
+
+
+```{r}
+miroc <- 'data/snw_LImon_MIROC-ESM_past1000_r1i1p1_085001-184912.nc' %>%
+  preprocess('snw', bbox, flip = TRUE) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = round(parse_number(layer))) %>%
+  rename(SWE = value) %>%
+  dplyr::select(-layer)
+
+miroc_patterns <- get_patterns(miroc, k = 4)
+
+swe_corr_miroc <- miroc %>%
+  rename(value = SWE) %>%
+  get_corrs(miroc_patterns)
+
+swe_corr_miroc %>%
+  gather(PC, value, PC1:PC4) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+        geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~PC, nrow = 1) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void()
+```
+
+```{r}
+hadcm3 <- 'data/snw_LImon_HadCM3_past1000_r1i1p1_085001-185012.nc' %>%
+  preprocess('snw', bbox, flip = TRUE) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = round(parse_number(layer))) %>%
+  rename(SWE = value) %>%
+  dplyr::select(-layer)
+
+hadcm3_patterns <- get_patterns(hadcm3, k = 4)
+
+swe_corr_hadcm3 <- hadcm3 %>%
+  rename(value = SWE) %>%
+  get_corrs(hadcm3_patterns)
+
+swe_corr_hadcm3 %>%
+  gather(PC, value, PC1:PC4) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+        geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~PC, nrow = 1) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void()
+```
+
+```{r}
+mpi <- 'data/snw_LImon_MPI-ESM-P_past1000_r1i1p1_085001-184912.nc' %>%
+  preprocess('snw', bbox, flip = TRUE) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = round(parse_number(layer))) %>%
+  rename(SWE = value) %>%
+  dplyr::select(-layer)
+
+mpi_patterns <- get_patterns(mpi, k = 4)
+
+swe_corr_mpi <- mpi %>%
+  rename(value = SWE) %>%
+  get_corrs(mpi_patterns)
+
+swe_corr_mpi %>%
+  gather(PC, value, PC1:PC4) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+        geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~PC, nrow = 1) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void()
+```
+
+```{r}
+ccsm <- 'data/snw_LImon_CCSM4_past1000_r1i1p1_085001-185012.nc' %>%
+  preprocess('snw', bbox, flip = TRUE) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = round(parse_number(layer))) %>%
+  rename(SWE = value) %>%
+  dplyr::select(-layer)
+
+ccsm_patterns <- get_patterns(ccsm, k = 4)
+
+swe_corr_ccsm <- ccsm %>%
+  rename(value = SWE) %>%
+  get_corrs(ccsm_patterns)
+
+swe_corr_ccsm %>%
+  gather(PC, value, PC1:PC4) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+        geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~PC, nrow = 1) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void()
+```
+```{r}
+mri1 <- 'data/snw_LImon_MRI-CGCM3_past1000_r1i1p1_085001-134912.nc' %>%
+  preprocess('snw', bbox, flip = TRUE) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = round(parse_number(layer))) %>%
+  rename(SWE = value) %>%
+  dplyr::select(-layer)
+mri2 <- 'data/snw_LImon_MRI-CGCM3_past1000_r1i1p1_135001-184912.nc' %>%
+  preprocess('snw', bbox, flip = TRUE) %>%
+  as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
+  mutate(year = round(parse_number(layer))) %>%
+  rename(SWE = value) %>%
+  dplyr::select(-layer)
+
+mri <- rbind(mri1, mri2)
+
+mri_patterns <- get_patterns(mri, k = 4)
+
+swe_corr_mri <- mri %>%
+  rename(value = SWE) %>%
+  get_corrs(mri_patterns)
+
+swe_corr_mri %>%
+  gather(PC, value, PC1:PC4) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+        geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~PC, nrow = 1) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void()
+```
