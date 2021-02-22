@@ -1,0 +1,631 @@
+---
+title: "Internal Variability"
+author: "Nick Gauthier"
+date: "2/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# analysis
+library(tidyverse)
+library(tidyEOF)
+library(scico)
+library(patchwork)
+library(gganimate)
+library(gstat)
+library(sf)
+
+load('../tidyEOF/R/sysdata.rda')
+```
+
+## Internal variability
+
+After the PCA truncation of the observed PRISM SWE field, we are left with a residual "noise" fraction that accounts for ~20% of the total field variance. Rather than remove this noise fraction, and loose the associated variance in our later reconstructions, we attempt to model it stochastically as a Gaussian random field. There are variety of ways to do this in R that vary in complexity and computational efficiency, so we'll compare a few here.
+
+First let's calculate the PCA and extract the residual noise. Use six PCs to start.
+```{r}
+n_modes <- 6
+prism_patterns <- get_patterns(prism_dat, k = n_modes)
+prism_recon <- reconstruct_field(prism_patterns)
+```
+
+Now calculate the residuals, standardized residuals, and "snowy" pixels with median SWE greater than 3mm.
+```{r}
+resids <- prism_recon %>%
+  left_join(prism_dat, by = c('x', 'y', 'year'), suffix = c('_recon', '_obs')) %>%
+  group_by(x, y) %>%
+  mutate(error = SWE_recon - SWE_obs,
+           error_sd = error/ sd(SWE_obs),
+           snowy = median(SWE_obs) > 3)
+```
+
+Visualize the residuals over time.
+```{r}
+resids %>%
+  ggplot(aes(x,y)) +
+  geom_raster(aes(fill = error)) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-600, 600)) +
+  coord_quickmap() +
+  theme_void() +
+  transition_states(year)
+```
+
+And the standardized residuals too.
+```{r}
+resids %>%
+  ggplot(aes(x,y)) +
+  geom_raster(aes(fill = error_sd)) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-5.5, 5.5)) +
+  coord_quickmap() +
+  theme_void() +  
+  ggtitle("Relative error", "March, {closest_state}") +
+  transition_states(year)
+```
+
+## Random fields
+
+Generate a baseline white noise field using the sample mean and standard deviation.
+```{r}
+whitenoise <- resids %>%
+  group_by(x, y) %>%
+  summarise(mn = mean(error),
+            sd = sd(error), 
+            .groups = 'drop') %>%
+  mutate(dat = map2(mn, sd, ~rnorm(6, .x, .y))) %>%
+  unnest(dat) %>%
+  mutate(time = rep_len(1:6, n()))
+```
+
+```{r}
+whitenoise %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = dat)) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-600, 600)) +
+  coord_quickmap() +
+  facet_wrap(~time) +
+  theme_void()
+```
+
+So it looks like the residuals are missing widespread low snow events in the lowlands, and some more significant high snow events on mountain peaks. Although the latter look like they could be individual anomalous observations too . . . 
+
+Plot the averages from the above time series.
+```{r, fig.width= 8, fig.height = 4}
+a <- resids %>%
+  group_by(x, y) %>%
+  summarise(avg = mean(error),
+            stdev = sd(error)) %>%
+    ggplot() +
+  geom_raster(aes(x, y, fill = avg)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_c() +
+  ggtitle('Mean error (mm SWE)', 'PRISM')
+
+b <- resids %>%
+  group_by(x, y) %>%
+  summarise(avg = mean(error),
+            stdev = sd(error)) %>%
+    ggplot() +
+  geom_raster(aes(x, y, fill = stdev)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_c() +
+  ggtitle('Error SD (mm SWE)', 'PRISM')
+
+c <- resids %>%
+  group_by(x, y) %>%
+  summarise(avg = mean(error),
+            stdev = sd(error)) %>%
+    ggplot() +
+  geom_raster(aes(x, y, fill = avg/stdev)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_c() +
+  ggtitle('Normalized error (SWE standard deviations)', 'PRISM')
+
+a + b + c
+```
+So on average the mean field is well represented (which is expected) and the residual variability correlates broadly with elevation/mean snow accumulation. Looking closer, we can see that the residuals are small in the mountains that experience a lot of SWE, which reflects the use of covariance EOFs targeting those areas.
+
+```{r}
+resids %>%
+  group_by(x, y) %>%
+  summarise(mn = mean(SWE_obs),
+            avg = mean(error),
+            stdev = sd(error)) %>%
+    ggplot() +
+  geom_raster(aes(x, y, fill = stdev / mn)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_c() +
+  ggtitle('SWE error SD divided by observed mean', 'PRISM')
+
+## from here, map the residual error for increasing numbers of pcs
+```
+
+if we limit the view to just snowy pixels, we can see how well the model is doing overall. The errors are primarily located in areas that don't typically receive snow save for one or two years in the observational record.
+
+```{r}
+resids %>%
+  filter(snowy == TRUE) %>%
+  group_by(x, y) %>%
+  summarise(avg = mean(error),
+            stdev = sd(error)) %>%
+    ggplot() +
+  geom_raster(aes(x, y, fill = avg/stdev)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_c() +
+  ggtitle('Normalized error (SWE standard deviations)', 'PRISM')
+```
+
+Differences in snowy pixels. in general, by truncating at 3, we slightly overestimate the amount of snowy pixels.
+```{r}
+prism_recon %>%
+   left_join(prism_dat, by = c('x', 'y', 'year'), suffix = c('_recon', '_obs'))%>%
+  group_by(x, y) %>%
+  summarise(rec_med = median(SWE_recon),
+            obs_med = median(SWE_obs)) %>%
+  mutate(obs_snowy = obs_med > 3,
+         rec_snowy = rec_med > 3,
+         agreement = case_when(obs_snowy == rec_snowy & obs_snowy == TRUE ~'True positive',
+                            obs_snowy == rec_snowy & obs_snowy == FALSE ~'True negative',
+                            obs_snowy != rec_snowy & obs_snowy == TRUE ~'False negative',
+                            obs_snowy != rec_snowy & obs_snowy == FALSE ~ 'False positive')) %>%
+      ggplot() +
+  geom_raster(aes(x, y, fill = agreement)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  ggtitle('Snow cover accuracy') +
+  scale_fill_viridis_d()
+```
+
+## Simulation
+
+```{r}
+library(furrr)
+plan(multisession, workers = 7)
+vars <- resids %>%
+  st_as_sf(coords = c('x','y'), crs = 4326) %>%
+  group_nest(year) %>%
+  mutate(var = future_map(data, ~variogram(error_sd ~ 1, .), .progress = TRUE),
+         fit = future_map(var, ~fit.variogram(., vgm(c("Exp", "Mat", "Sph", "Gau", "Ste", "Cir", "Lin", "Bes"))))) 
+
+
+map2(vars$var, vars$fit, ~plot(.x, model = .y))
+```
+```{r}
+t1 <- bind_rows(vars$var, .id = 'test') %>%
+  group_by(dist) %>%
+  summarise(gamma = mean(gamma))
+
+t2 <- vars$var[[1]]
+t2$gamma <- t1$gamma
+v1 <- fit.variogram(t2, vgm(c("Exp", "Mat", "Sph", "Gau", "Ste", "Cir", "Lin", "Bes")))
+```
+so the average variogram gets us a nugget with psil 0.09413353 and range 0, matern covariance with psill 0.37283848 and range 160.5867.
+```{r}
+pts <- resids %>%
+  filter(year == 1982) %>%
+  st_as_sf(coords = c('x','y'), crs = 4326) %>%
+    select(geometry)
+
+pts_grid <- st_bbox(pts) %>%
+  st_as_stars(dx = .166) %>%
+  st_set_crs(4326)
+pts2 <- st_coordinates(pts) %>% as.data.frame()
+coordinates(pts2) <- ~X+Y
+gridded(pts2) <- TRUE
+pts2 <- SpatialPixels(pts2)
+pts.grid <- st_as_stars(pts)
+##EP: add x and y to meuse.grid:
+pts.grid$x = st_coordinates(pts.grid)[,1]
+pts.grid$y = st_coordinates(pts.grid)[,1]
+#mask:
+pts.grid$x[is.na(pts.grid$part.a)] = NA
+pts.grid$y[is.na(pts.grid$part.a)] = NA
+
+unconSim <- krigeSimCE(z~1, newdata = as(pts_grid, 'Spatial'), model = v1, n=1)
+unconSim2 <- krige(formula = z~1, newdata = pts_grid, dummy = TRUE, beta = 1, locations = pts, model = v1, nsim=1, nmax = 30)
+
+library(stars)
+st_as_stars(pts) %>% plot
+```
+
+```{r}
+map(vars$fit, ~.[2,1])
+```
+
+
+Are the residuals autocorrelated? Some are
+```{r}
+resids %>%
+  group_by(x,y) %>%
+  arrange(year) %>% #not necessary, but just to be safe
+  summarise(autocor = cor(error, lag(error), use = 'pairwise.complete.obs')) %>%
+ # arrange(-abs(autocor)) %>%
+  ggplot(aes(x, y)) +
+  geom_raster(aes(fill = autocor)) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-.6, .6)) +
+  coord_quickmap()
+```
+
+
+
+Look here, the observations have some extremely (suspect?) high values -- noise that the pca removes? or real? Clear heteroscedasticity 
+```{r}
+resids %>%
+  ggplot(aes(SWE_obs, SWE_recon)) +
+  geom_point(alpha = .1) +
+  geom_smooth() +
+  theme_bw()
+
+resids %>%
+  ggplot(aes(SWE_obs, error)) +
+  geom_point(alpha = .1) +
+  geom_smooth() +
+  theme_bw()
+```
+
+```{r}
+resids %>%
+  ggplot(aes(error)) +
+  geom_histogram() +
+  theme_bw()
+
+resids %>%
+ filter(between(error, -200, 200)) %>%
+  ggplot(aes(error)) +
+  geom_histogram() +
+ #   stat_function(fun = dnorm, n = 101, args = list(mean = 0.5, sd = 19.5), color = 'red') +
+  theme_bw()
+
+resids %>% group_by(x, y) %>%
+  filter(median(SWE_recon) > 3 & median(SWE_obs) > 3) %>%
+  ggplot(aes(error)) +
+  geom_histogram() +
+  theme_bw()
+```
+
+```{r}
+resids_log %>%
+ #filter(between(error, -100, 100)) %>%
+  ggplot(aes(error)) +
+  geom_histogram() +
+#    stat_function(fun = dnorm, n = 101, args = list(mean = 0.5, sd = 19.5), color = 'red') +
+  theme_bw()
+
+resids_log %>% group_by(x, y) %>%
+  filter(median(SWE_recon) > 3 & median(SWE_obs) > 3) %>%
+  ggplot(aes(error)) +
+  geom_histogram() +
+  theme_bw()
+```
+
+```{r}
+resids %>%
+  arrange(error)
+```
+
+
+Is it normal?
+
+huh, if p < 0.05 that suggests it isn't normal
+```{r}
+resids %>%
+  group_by(x, y) %>%
+  summarise(p = shapiro.test(error)$p) %>%
+  ggplot() +
+    geom_raster(aes(x, y, fill = p < 0.05)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_d() +
+  ggtitle('Shapiro-Wilk test of normality', 'PRISM')
+```
+
+```{r}
+pts <- resids %>%
+  filter(year == 1982) %>%
+  st_as_sf(coords = c('x','y'), crs = 4326)
+```
+
+## Lattice Krig
+interesting, lattice kriging the standardized and unstandardized doesn't seem to make a difference
+```{r}
+library(LatticeKrig)
+# should set to LKSphere using setup
+testk <- LatticeKrig(st_coordinates(pts), pts$error_sd)
+testk2 <- LatticeKrig(st_coordinates(pts), pts$error)
+LKrig.cov.plot(testk2$LKinfo)
+
+look <- testk2$LKinfo
+
+    plot(look$u[,1], look$cov[,1], type="l")
+    plot(look$u[,2], look$cov[,2], type="l")
+
+gSim <- LKrig.sim(st_coordinates(pts), testk$LKinfo, M = 5)
+gSim2 <- LKrig.sim(st_coordinates(pts), testk2$LKinfo, M = 5)
+
+resids %>%
+  filter(year == 1982) %>%
+  bind_cols(as_tibble(gSim)) %>%
+  pivot_longer(V1:V5) %>%
+    ggplot(aes(x, y)) +
+  geom_raster(aes(fill = value)) +
+  facet_wrap(~name) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-3, 3)) +
+  coord_quickmap() +
+  theme_void()
+
+resids %>%
+  filter(year == 1982) %>%
+  bind_cols(as_tibble(gSim2)) %>%
+  pivot_longer(V1:V5) %>%
+    ggplot(aes(x, y)) +
+  geom_raster(aes(fill = value)) +
+  facet_wrap(~name) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-3, 3)) +
+  coord_quickmap() +
+  theme_void()
+
+
+testk2$LKinfo;testk$LKinfo
+```
+## Convo Spat
+
+```{r}
+library(convoSPAT)
+t1 <- NSconvo_fit(data = pts$error, coords = st_coordinates(pts), N.mc = 9, fit.radius = 1.1, ns.variance = TRUE, cov.model = 'matern')
+gc()
+getOption('R_MAX_VSIZE')
+```
+## Random Fields
+
+```{r}
+library(RandomFields)
+
+
+## covariance model with variance, scale and nugget to be estimated;
+## just to abbreviate later on
+M <- RMexp(var=NA, scale=NA) + RMnugget(var=NA)
+ 
+
+## short definition of a trend using the fact that ca20.df is a
+## data.frame
+test2 <- ~ 1 + M
+(ca20.fit02.RF <- RFfit(test2, data=testdat, M=M))
+
+## long definition which also allows for more general constructions
+ca20.RFmod02 <- NA + NA*RMcovariate(ca20.df$altitude) + M 
+(ca20.fit02.RF <- RFfit(ca20.RFmod02, data=ca20.df))
+
+
+## Note that the following also works.
+## Here, the covariance model must be the first summand
+ca20.RFmod02 <- M + NA + ca20.df$altitude 
+print(ca20.fit02.RF <- RFfit(ca20.RFmod02, data=ca20.df))
+
+### The following does NOT work, as R assumes (NA + ca20.df$altitude) + M
+### In particular, the model definition gives a warning, and the
+### RFfit call gives an error: 
+(ca20.RFmod02 <- NA + ca20.df$altitude + M) 
+try(ca20.fit02.RF <- RFfit(ca20.RFmod02, data=ca20.df)) ### error ...
+```
+```{r}
+library(mgcv)
+test4 <- bam(error ~ te(x,y, k = 100), data = testdat)
+
+plot(test4, scheme = 2)
+```
+
+
+```{r}
+library(moments)
+
+resids %>%
+  group_by(x, y) %>%
+  summarise(kurtosis = kurtosis(error)) %>%
+  ggplot() +
+    geom_raster(aes(x, y, fill = kurtosis)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_c() +
+  ggtitle('Kurtosis', 'PRISM')
+
+resids %>%
+  group_by(x, y) %>%
+  summarise(kurtosis = kurtosis(error)) %>%
+  ggplot() +
+    geom_raster(aes(x, y, fill = kurtosis < 0)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_d() +
+  ggtitle('Kurtosis', 'PRISM')
+
+resids %>%
+  group_by(x, y) %>%
+  summarise(skew = skewness(error)) %>%
+  ggplot() +
+    geom_raster(aes(x, y, fill = skew)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_c() +
+  ggtitle('Skewness', 'negative values are right skewed')
+
+resids %>%
+  group_by(x, y) %>%
+  summarise(skew = skewness(error)) %>%
+  ggplot() +
+    geom_raster(aes(x, y, fill = abs(skew) > 1)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_d() +
+  ggtitle('Skewness', 'negative values are right skewed')
+
+resids %>%
+  group_by(x, y) %>%
+  summarise(skew = skewness(error)) %>%
+  ggplot() +
+    geom_raster(aes(x, y, fill = abs(skew) > 0.5)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_d() +
+  ggtitle('Skewness', 'negative values are right skewed')
+```
+
+
+```{r}
+resids %>%
+  group_by(x, y) %>%
+  mutate(p = shapiro.test(error)$p) %>%
+  filter(p >= 0.05) %>%
+  summarise(mn = mean(error),
+            sd = sd(error), 
+            .groups = 'drop') %>%
+      sample_frac(.10) %>%
+  mutate(dat = map2(mn, sd, ~rnorm(100, .x, .y))) %>%
+  unnest(dat) %>%
+  ggplot(aes(dat, group = interaction(x,y))) +
+  geom_density(alpha = .2)
+```
+
+```{r}
+library(fitdistrplus)
+resids %>%
+  group_by(x, y) %>%
+  mutate(p = shapiro.test(error)$p) %>%
+  filter(p >= 0.05) %>%
+  filter(near(x, .$x[[1000]])) %>%
+  pull(error) %>%
+  descdist()
+```
+
+```{r}
+descdist(resids$error)
+```
+
+
+```{r}
+library(raster)
+ref <- raster('../tidyEOF/data-raw/UA-SWE/4km_SWE_Depth_WY1982_v01.nc') %>%
+  crop(extent(c(-125, -102, 31, 49))) %>%
+  aggregate(fact = 2)
+srtm <- raster::raster('/Volumes/Data/Data/SRTM_1km.tif') %>%
+  crop(extent(c(-125, -102, 31, 49)))
+
+plot(srtm > 2000)
+
+srtm_dat <- as.data.frame(srtm, xy = TRUE, na.rm = TRUE) %>%
+    mutate(x = round(x, 2), y = round(y, 2))
+# so not an obious relaitonship to elevation
+
+resids %>%
+  group_by(x, y) %>%
+  summarise(avg = mean(error),
+            stdev = sd(error)) %>%
+  ungroup() %>%
+  mutate(x = round(x, 2), y = round(y, 2)) %>%
+  left_join(srtm_dat)
+```
+
+
+
+So it seems to be normal in places where the errors are? Thats just the normalized errors. For retaining variance still need to remember the high stdev. So there its still nonnormal, and not lognormal either?
+
+now look at measures of global and local autocorrelation
+```{r}
+resids
+```
+
+
+
+```{r}
+ resids %>%
+  filter(between(error, -200, 200))
+```
+
+
+```{r}
+get_scores <- function(x) {
+  x %>%
+    #filter(sd > 0) %>%
+    summarise(xbar = mean(SWE_obs),
+              sd = sd(SWE_obs),
+              me = mean(error),
+              mse = mean(error ^ 2),
+              rmse = sqrt(mse),
+              srmse = rmse/sd,
+              mae = mean(abs(error)),
+              mdae = median(abs(error)),
+              mse_clim = sum((SWE_obs - xbar)^2) * (1 / (n() - 1)) * ((n() - 1) / n()),
+              msss = 1 - mse / mse_clim,
+              mape = mean(abs(relative_error)) * 100,
+              mpe = mean(relative_error) * 100,
+              mdsa = 100 * (exp(median(abs(log_q))) - 1), # median symmetric accuracy
+              sspb = 100 * sign(median(log_q)) * (exp(abs(median(log_q))) - 1),
+              rmsle = sqrt(mean(log(SWE_obs / SWE_recon)^2))) %>%
+    ungroup() %>%
+    dplyr::select(-xbar, -sd, -mse_clim)
+}
+```
+
+
+```{r}
+score_map <- prism_recon %>%
+  get_errors() %>%
+  group_by(x, y) %>%
+  get_scores()
+
+score_ts <- prism_recon %>%
+  get_errors() %>%
+    group_by(x, y) %>%
+    filter(median(SWE_recon) > 3 & median(SWE_obs) > 3) %>%
+  ungroup() %>%
+  group_by(year) %>%
+  get_scores()
+```
+
+
+```{r, fig.width = 10}
+score_ts %>%
+  gather(metric, value, me:rmsle) %>%
+  ggplot(aes(year, value)) +
+  geom_line() +
+  facet_wrap(~metric, scales = 'free_y') +
+  theme_bw()
+```
+
+
+```{r}
+  plot_fun <- function(x, name) {
+      ggplot(x) +
+  geom_raster(aes(x, y, fill = value)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_c(name = name)
+  }
+
+tmp <- score_map %>%
+gather(metric, value, me:rmsle) %>%
+group_by(metric) %>%
+  nest %>%
+  mutate(plots = map2(data, metric, plot_fun))
+tmp$plots
+```
+
+```{r}
+score_map %>%
+      ggplot() +
+  geom_raster(aes(x, y, fill = srmse < .7)) +
+  geom_sf(data = states_wus, fill = NA, color = 'black') +
+  theme_void() +
+  scale_fill_viridis_d()
+```
+
+
+```{r}
+
+```
+
