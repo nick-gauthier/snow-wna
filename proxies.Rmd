@@ -1,0 +1,63 @@
+---
+title: "Proxies"
+author: "Nick Gauthier"
+date: "3/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(sf)
+library(FedData)
+library(stars)
+```
+
+```{r}
+load('../tidyEOF/R/sysdata.rda')#data.Rdata')
+
+prism <- prism_dat %>% st_as_stars(dims = c(1,2,4)) %>% select(-year) %>% st_set_crs(4326) 
+
+ggplot() +
+  geom_stars(data = prism) +
+  facet_wrap(~year) +
+  scale_fill_viridis_c(na.value = 'white') +
+  coord_quickmap()
+```
+
+```{r}
+vepPolygon <- polygon_from_extent(raster::extent(672800, 740000, 4102000, 4170000),
+  proj4string = "+proj=utm +datum=NAD83 +zone=12"
+)
+
+```
+
+```{r}
+ITRDB <- get_itrdb(template=st_bbox(prism) %>% raster::extent() %>% polygon_from_extent(proj4string =  "+proj=longlat +datum=WGS84 +no_defs"), label='wus', chronology.type = 'ARSTND', recon.years = 1981:2017) #%>% as_tibble %>% st_as_sf(coords = c('Lat', 'Lon'), crs = 4326)
+
+meta <- ITRDB$metadata %>% 
+  as_tibble() %>% 
+  st_as_sf(coords = c('LON', 'LAT'), crs = 4326) %>%
+  select(SERIES)
+
+prism_extract <- st_extract(prism, meta) %>% 
+  as_tibble %>%
+  mutate(year = year + 0.5) %>%
+  st_as_sf %>%
+  st_join(meta,join =st_equals) %>%
+  st_drop_geometry()
+
+treering <- ITRDB$widths %>% 
+  as_tibble(rownames = 'year') %>% 
+  mutate(year = as.numeric(year)) %>% 
+  filter(year > 1981) %>%
+  pivot_longer(-year, names_to = 'SERIES') %>% 
+  pivot_wider(names_from = year, values_from = value) %>%
+  pivot_longer(-SERIES, names_to = 'year', names_transform = list(year = as.numeric)) %>%
+  left_join(prism_extract)
+```
+```{r}
+ggplot(treering, aes(SWE, value)) +
+  geom_point()
+```
+

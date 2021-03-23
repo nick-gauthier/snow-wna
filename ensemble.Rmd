@@ -10,6 +10,8 @@ library(stars)
 library(tidyEOF)
 library(tidyverse)
 library(scico)
+
+library(patchwork)
 ```
 
 Import state data for plotting.
@@ -26,7 +28,7 @@ states_wus <- maps::map('state', regions = state_names,
   st_as_sf()
 ```
 
-Write a function to prerpocess the data.
+Write a function to preprocess the data.
 
 ```{r}
 preprocess <- function(x, var, bbox, flip = FALSE, regrid = FALSE, daily = FALSE) {
@@ -60,7 +62,8 @@ rasts <- c('data/snw_LImon_MIROC-ESM_past1000_r1i1p1_085001-184912.nc',
   'data/snw_LImon_CCSM4_past1000_r1i1p1_085001-185012.nc') %>%
   map(preprocess, var = 'snw', bbox, flip = TRUE) %>%
   map(resample, mri) %>%
-  map(~mask(., all(near(., 0)), maskvalue = 1)) %>%
+  map(clamp, lower = 0) %>% # the resampling procedure introduces negative values, this sets them to zero
+  map(~mask(., all(near(., 0)), maskvalue = 1)) %>% # mask cells that never experience snow
   map(mask, mri[[1]])
 
 rasts[[5]] <- mri
@@ -80,7 +83,7 @@ prep <- function(x) {
 
 dat <- map(rasts, prep)
 
-patterns <- map(dat, get_patterns, k = 6)
+patterns <- map(dat, get_patterns, k = 4)
 
 get_corrs2 <- function(dat, patterns) { # should be able to take arbitrary number of amps rather than first 4
   amps <- patterns$amplitudes %>%
@@ -89,32 +92,200 @@ get_corrs2 <- function(dat, patterns) { # should be able to take arbitrary numbe
   dat %>%
     group_by(x, y) %>%
     nest %>%
+    # can use corrr here 
     mutate(corrs = map(data,  ~inner_join(., amps, by = 'year') %>%
                          summarise(PC1 = cor(value, PC1),
                                    PC2 = cor(value, PC2),
                                    PC3 = cor(value, PC3),
-                                   PC4 = cor(value, PC4),
-                                   PC5 = cor(value, PC5),
-                                   PC6 = cor(value, PC6)))) %>%
+                                   PC4 = cor(value, PC4)))) %>%
     select(-data) %>%
-    unnest(corrs)
+    unnest(corrs) %>%
+    ungroup()
 }
 
 corrs <- dat %>%
   map( ~rename(., value = SWE)) %>%
-  map2(patterns, get_corrs2)
+  map2(patterns, get_corrs2) %>%
+  setNames(c("MIROC-ESM", "HadCM3", "MPI-ESM-P", "CCSM4", "MRI-CGCM3"))
 
 corrs %>%
   bind_rows(.id = 'model') %>%
-  gather(PC, value, PC1:PC6) %>%
+  gather(PC, value, PC1:PC4) %>%
 ggplot() +
   geom_raster(aes(x, y, fill = value)) +
-        geom_sf(data = states_wus, fill = NA, color = 'black') +
-  facet_grid(model~PC) +
+  #      geom_sf(data = states_wus, fill = NA, color = 'black', alpha = .5) +
+  facet_grid(PC~model) +
 scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
     labs(x = 'Longitude', y = 'Latitude') +
-  theme_void()
+  theme_void() +
+  coord_quickmap()
 ```
+
+```{r}
+patterns %>%
+  map(~.$amplitudes) %>%
+  setNames(c("MIROC-ESM", "HadCM3", "MPI-ESM-P", "CCSM4", "MRI-CGCM3")) %>%
+  bind_rows(.id = 'model') %>%
+ggplot(aes(year, amplitude)) + geom_line() + facet_grid(PC~model)+ geom_smooth()
+  
+ patterns[[1]]$amplitudes %>%
+  group_by(PC) %>%
+  filter(amplitude == max(amplitude) | amplitude == min(amplitude)) %>%
+   mutate(sign = sign(amplitude)) %>%
+   left_join(dat[[1]]) %>%
+  ggplot(aes(x, y, fill = SWE)) +
+  geom_raster() +
+  facet_grid(PC~sign) +
+  coord_quickmap() +
+  scale_fill_viridis_c() +
+  theme_void()
+
+#reof_obs$amps <- reof_obs$amps %>%
+#  mutate(reof_amp = if_else(PC == 'PC6', reof_amp * -1, reof_amp))
+```
+
+
+```{r}
+corrs[[1]]$PC1 %*% corrs[[1]]$PC1
+
+corrs[[1]]$PC1 %*% -corrs[[1]]$PC1
+cor(corrs[[1]]$PC1, corrs[[5]]$PC1)
+
+```
+Try the same thing across time
+```{r}
+test <- dat[[4]] %>%
+  mutate(century = floor(year/100)) %>%
+  group_nest(century) %>%
+  mutate(patterns = map(data, get_patterns, k = 4),
+         data = map(data, ~rename(., value = SWE)),
+        corrs = map2(data, patterns, get_corrs2))
+
+test %>%
+  select(century, corrs) %>%
+  unnest(corrs) %>%
+  gather(PC, value, PC1:PC4) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+    #    geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_grid(PC~century) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void() +
+  coord_quickmap()
+```
+
+```{r}
+test_fun <- function(x) {
+  x %>% mutate(century = floor(year/100)) %>%
+  group_nest(century) %>%
+  mutate(data = map(data, ~group_by(., x,y) %>% filter(all(SWE > 0)) %>% ungroup),
+         patterns = map(data, get_patterns, k = 4),
+         data = map(data, ~rename(., value = SWE)),
+        corrs = map2(data, patterns, get_corrs2))
+}
+  
+tmp <- map(dat, test_fun)
+########3 start here, I've done the one functio right, now try the matching!
+tmp[[1]] %>%
+  select(century, corrs) %>%
+  unnest(corrs) %>%
+  gather(PC, value, PC1:PC4) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value)) +
+    #    geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_grid(PC~century) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void() +
+  coord_quickmap()
+```
+
+
+```{r}
+library(corrr)
+test %>%
+  select(century, corrs) %>%
+  unnest(corrs)
+
+  
+  
+newfun <- function(x) {
+    x %>%
+      as.data.frame() %>%
+  rownames_to_column() %>%
+  pivot_longer(PC1:PC4) %>%
+  group_by(rowname) %>%
+  filter(abs(value) == max(abs(value))) %>%
+    ungroup
+}
+
+
+key <- test %>%
+  mutate(cor2 = map(corrs, ~cor(select(test$corrs[[1]], -x, -y), select(., -x, -y))),
+         test = map(cor2, newfun)) %>%
+  select(century, test) %>%
+  unnest(test)
+
+newfun_2 <-  function(x) {
+  x %>%
+    mutate(cor2 = map(corrs, ~cor(select(x$corrs[[1]], -x, -y), select(., -x, -y))),
+         test = map(cor2, newfun)) %>%
+  select(century, test) %>%
+  unnest(test)
+}
+#key isn't working  for some
+key2 <- map(tmp[[1]], newfun_2)
+
+t2 <- tmp[[1]] %>%
+    mutate(cor2 = map(corrs, ~cor(select(tmp[[1]]$corrs[[1]], -x, -y), select(., -x, -y))))#,
+         cors = map(cor2, newfun)) %>%
+  select(century, cors) %>%
+  unnest(cors)
+key
+
+t2$cor2
+
+cor(select(tmp[[1]]$corrs[[1]], -x, -y),select(tmp[[1]]$corrs[[1]], -x, -y))
+tmp[[1]]$corrs[[1]]
+# now join this back to the plot or something?
+```
+why are there replicatns
+```{r}
+test %>%
+  select(century, corrs) %>%
+  unnest(corrs) %>%
+  gather(PC, value, PC1:PC4) %>%
+  left_join(key, by = c('century', 'PC' = 'rowname')) %>%
+  mutate(value.x = if_else(sign(value.y) == 1, value.x * -1, value.x)) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value.x)) +
+    #    geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_grid(name~century) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void() +
+  coord_quickmap()
+```
+
+```{r}
+tmp[[1]] %>%
+  select(century, corrs) %>%
+  unnest(corrs) %>%
+  gather(PC, value, PC1:PC4) %>%
+  left_join(key2[[1]], by = c('century', 'PC' = 'rowname')) %>%
+  mutate(value.x = if_else(sign(value.y) == 1, value.x * -1, value.x)) %>%
+ggplot() +
+  geom_raster(aes(x, y, fill = value.x)) +
+    #    geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_grid(name~century) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation') +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void() +
+  coord_quickmap()
+```
+
+
 ```{r}
  dat %>%
   walk(~get_anomalies(.) %>%

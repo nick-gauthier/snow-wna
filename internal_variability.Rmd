@@ -41,7 +41,7 @@ resids <- prism_recon %>%
   group_by(x, y) %>%
   mutate(error = SWE_recon - SWE_obs,
            error_sd = error / sd(SWE_obs), # pearson residuals
-           error_sd2 = error / sd(error), # standaridized (internally studentized)
+           error_sd2 = error / sd(error), # standardized (internally studentized)
          snowy = median(SWE_obs) > 3)
 ```
 
@@ -382,6 +382,8 @@ resids %>%
   ggtitle('Shapiro-Wilk test of normality', 'PRISM')
 ```
 
+
+## Lattice Krig
 ```{r}
 pts <- resids %>%
   filter(year == 1982) %>%
@@ -393,8 +395,7 @@ dat2 <- resids %>%
   pivot_wider(id_cols = c(x,y), names_from = year, values_from = error)
 ```
 
-## Lattice Krig
-interesting, lattice kriging the standardized and unstandardized doesn't seem to make a difference. comparing auto a weight selection to defaults, default has fewer degrees of freedom and a rho value that's significantly larger than otherwise. fit awght of 8.4
+interesting, lattice kriging the standardized and unstandardized doesn't seem to make a difference. 
 ```{r}
 out1<- LatticeKrig(st_coordinates(pts), dat[,3:38])
 out2<- LatticeKrig(st_coordinates(pts), dat2[,3:38])
@@ -404,20 +405,26 @@ out2<- LatticeKrig(st_coordinates(pts), dat2[,3:38])
 out1
 out2
 ```
-
-
+```{r}
+out1$rho.MLE
+out2$rho.MLE
+sqrt(out1$rho.MLE.FULL)
+sqrt(out2$rho.MLE.FULL)
+```
 
 
 ```{r}
 # these simulate with marginal unit variance, need to multiply by sill to recover original
-gSim <- LKrig.sim(st_coordinates(pts), out1$LKinfo, M = 6)
-gSim2 <- LKrig.sim(st_coordinates(pts), out2$LKinfo, M = 6)
+gSim <- LKrig.sim(st_coordinates(pts), out1$LKinfo, M = 6) * sqrt(out1$rho.MLE.FULL)
 
+gSim2 <- LKrig.sim(st_coordinates(pts), out2$LKinfo, M = 6) * sqrt(out2$rho.MLE.FULL)
+```
 
+```{r}
 resids %>%
   group_by(x,y) %>%
   summarise(swe_sd = sd(error)) %>%
-  bind_cols(as_tibble(gSim3)) %>%
+  bind_cols(as_tibble(gSim)) %>%
   pivot_longer(V1:V6) %>%
     ggplot(aes(x, y)) +
   geom_raster(aes(fill = value * swe_sd)) +
@@ -428,7 +435,7 @@ resids %>%
 
 resids %>%
   filter(year == 1982) %>%
-  bind_cols(as_tibble(gSim3)) %>%
+  bind_cols(as_tibble(gSim)) %>%
   pivot_longer(V1:V6) %>%
     ggplot(aes(x, y)) +
   geom_raster(aes(fill = value)) +
@@ -437,10 +444,28 @@ resids %>%
   coord_quickmap() +
   theme_void()
 
+resids %>%
+  group_by(x,y) %>%
+  summarise(swe_sd = sd(error)) %>%
+  bind_cols(as_tibble(gSim2)) %>%
+  pivot_longer(V1:V6) %>%
+    ggplot(aes(x, y)) +
+  geom_raster(aes(fill = value * swe_sd)) +
+  facet_wrap(~name) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-300, 300)) +
+  coord_quickmap() +
+  theme_void()
 
-testk2$LKinfo;testk$LKinfo
-
-LKrig.lnPlike
+resids %>%
+  filter(year == 1982) %>%
+  bind_cols(as_tibble(gSim2)) %>%
+  pivot_longer(V1:V6) %>%
+    ggplot(aes(x, y)) +
+  geom_raster(aes(fill = value)) +
+  facet_wrap(~name) +
+  #scale_fill_distiller(palette = 'RdBu', limits = c(-3, 3)) +
+  coord_quickmap() +
+  theme_void()
 ```
 ## Convo Spat
 
