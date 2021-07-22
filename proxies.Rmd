@@ -9,55 +9,175 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(sf)
-library(FedData)
 library(stars)
+load('../tidyEOF/R/sysdata.rda')
+```
+
+
+# Snow Proxies
+Read in the raw data.
+```{r}
+chron <- read_csv('data/snow_chronology_matrix.csv', 
+                  col_names = FALSE, 
+                  na = 'NaN', 
+                  col_types = cols(.default = col_double()))
+loc <- read_csv('data/snow_location_matrix.csv', col_names = FALSE)
+```
+Plot the individual chronologies.
+```{r}
+pivot_longer(chron, -X1) %>%
+  ggplot(aes(X1, value, group = name)) +
+  geom_line(alpha = 0.1) +
+  theme_minimal()
+```
+And again for the period where all records overlap.
+```{r}
+drop_na(chron) %>%
+pivot_longer(-X1) %>%
+  ggplot(aes(X1, value, group = name)) +
+  geom_line(alpha = 0.1) +
+  theme_minimal()
+```
+What's going on with the location data? It looks like the x and y coordinates arranged in a row.
+```{r}
+plot(c(t(loc)))
+```
+
+
+How long is the total sequence?
+```{r}
+ncol(loc)
+```
+And so is the break at 326? Yes it is!
+```{r}
+loc[,320:330]
+```
+So lets fix the coordinates.
+```{r}
+coords <- tibble(lon = c(t(loc[,1:326])), lat = c(t(loc[,327:652])))
+```
+
+Now reshape the chronologies and combine.
+```{r}
+chron %>%
+  column_to_rownames(var = 'X1') %>%
+  t() %>%
+  as_tibble() %>%
+  st_as_stars(dims = coords)
 ```
 
 ```{r}
-load('../tidyEOF/R/sysdata.rda')#data.Rdata')
-
-prism <- prism_dat %>% st_as_stars(dims = c(1,2,4)) %>% select(-year) %>% st_set_crs(4326) 
-
-ggplot() +
-  geom_stars(data = prism) +
-  facet_wrap(~year) +
-  scale_fill_viridis_c(na.value = 'white') +
+ggplot(coords, aes(lon, lat)) +
+  geom_point() +
   coord_quickmap()
 ```
 
 ```{r}
-vepPolygon <- polygon_from_extent(raster::extent(672800, 740000, 4102000, 4170000),
-  proj4string = "+proj=utm +datum=NAD83 +zone=12"
-)
-
+pca <- chron %>%
+  drop_na() %>%
+  select(-X1) %>%
+  prcomp(scale. = FALSE)
 ```
 
 ```{r}
-ITRDB <- get_itrdb(template=st_bbox(prism) %>% raster::extent() %>% polygon_from_extent(proj4string =  "+proj=longlat +datum=WGS84 +no_defs"), label='wus', chronology.type = 'ARSTND', recon.years = 1981:2017) #%>% as_tibble %>% st_as_sf(coords = c('Lat', 'Lon'), crs = 4326)
+plot(pca$sdev)
+screeplot(pca, type = 'line', npcs = 20)
+```
 
-meta <- ITRDB$metadata %>% 
-  as_tibble() %>% 
-  st_as_sf(coords = c('LON', 'LAT'), crs = 4326) %>%
-  select(SERIES)
+```{r}
+coords %>%
+  bind_cols(as_tibble(pca$rotation)) %>%
+  select(lon:PC6) %>%
+  pivot_longer(-c(lon, lat), names_to = 'PC') %>%
+  arrange(abs(value)) %>%
+ggplot() +
+  geom_sf(data = states_wus, fill = NA) +
+  geom_point(aes(lon, lat, color = value)) +
+  facet_wrap(~PC) +
+  theme_bw() +
+  scale_color_distiller(palette = 'RdBu', limits = c(-.29, .29))
+```
 
-prism_extract <- st_extract(prism, meta) %>% 
-  as_tibble %>%
-  mutate(year = year + 0.5) %>%
-  st_as_sf %>%
-  st_join(meta,join =st_equals) %>%
-  st_drop_geometry()
 
-treering <- ITRDB$widths %>% 
-  as_tibble(rownames = 'year') %>% 
-  mutate(year = as.numeric(year)) %>% 
-  filter(year > 1981) %>%
-  pivot_longer(-year, names_to = 'SERIES') %>% 
-  pivot_wider(names_from = year, values_from = value) %>%
-  pivot_longer(-SERIES, names_to = 'year', names_transform = list(year = as.numeric)) %>%
-  left_join(prism_extract)
+
+```{r}
+library(automap)
+library(gstat)
+trees <- coords %>%
+  st_as_sf(coords = 1:2) %>%
+  bind_cols(as_tibble(pca$rotation)) %>%
+    select(PC1:PC4) %>%
+  st_set_crs(st_crs(prism))
+
+trees2 <- coords %>%
+  st_as_sf(coords = 1:2) %>%
+  bind_cols(as_tibble(unclass(varimax(pca$rotation[, 1:4, drop = FALSE] %>% # drop = FALSE preserves PC names when there's only 1 PC
+      `%*%`(diag(pca$sdev, 4, 4)) %>% # scale by sdev (sqrt(eigenvalues)) for more robust rotation
+    `colnames<-`(paste0('PC', 1:4)))$loadings))) %>%
+  st_set_crs(st_crs(prism))
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = states_wus, fill = NA) +
+  geom_sf(data = pivot_longer(trees, cols = -geometry, names_to = 'PC') %>% arrange(abs(value)), aes(color = value, geometry = geometry)) +
+  facet_wrap(~PC) +
+  theme_bw() +
+  scale_color_distiller(palette = 'RdBu', limits = c(-.29, .29))
 ```
 ```{r}
-ggplot(treering, aes(SWE, value)) +
-  geom_point()
+ggplot() +
+  geom_sf(data = states_wus, fill = NA) +
+  geom_sf(data = pivot_longer(trees2, cols = -geometry, names_to = 'PC') %>% arrange(abs(value)), aes(color = value, geometry = geometry)) +
+  facet_wrap(~PC) +
+  theme_bw() +
+  scale_color_distiller(palette = 'RdBu', limits = c(-.6, .6))
+```
+```{r}
+new_trees <- as(trees, "Spatial")[-sp::zerodist(as(trees, "Spatial"))[,1],]
+new_trees2 <- as(trees2, "Spatial")[-sp::zerodist(as(trees2, "Spatial"))[,1],]
+m = c('PC1', 'PC2', 'PC3', 'PC4')
+result = list()
+for(i in m) {
+  f = as.formula(paste0(i, " ~ 1"))
+  v = autofitVariogram(f, new_trees)
+  g = gstat(formula = f, model = v$var_model, data = new_trees)
+  z = predict(g, slice(prism, 'time', 1))
+  z = z["var1.pred",,]
+  result[[i]] = z
+}
+result2 = list()
+for(i in m) {
+  f = as.formula(paste0(i, " ~ 1"))
+  v = autofitVariogram(f, new_trees2)
+  g = gstat(formula = f, model = v$var_model, data = new_trees2)
+  z = predict(g, slice(prism, 'time', 1))
+  z = z["var1.pred",,]
+  result2[[i]] = z
+}
+pc_map <- do.call('c', result) %>%
+  merge(name = 'PC')
+pc_map2 <- do.call('c', result2) %>%
+  merge(name = 'PC')
 ```
 
+```{r}
+ggplot() +
+  geom_stars(data = pc_map) +
+  geom_sf(data = states_wus, fill = NA) +
+  geom_sf(data = trees, pch = '.') +
+ # geom_point(aes(lon, lat, color = value)) +
+  facet_wrap(~PC) +
+  theme_bw() +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-.135, .135))
+```
+```{r}
+ggplot() +
+  geom_stars(data = pc_map2) +
+  geom_sf(data = states_wus, fill = NA) +
+  geom_sf(data = trees2, pch = '.') +
+ # geom_point(aes(lon, lat, color = value)) +
+  facet_wrap(~PC) +
+  theme_bw() +
+  scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-.5, .5))
+```
