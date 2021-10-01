@@ -3,19 +3,17 @@ title: "Snow in the Last PMIP-3 Last Millennium "
 output: html_notebook
 ---
 
-```{r}
+# Setup
+
+```{r setup}
 library(raster)
 library(stars)
 #install.packages('../tidyEOF_0.1.0.tar.gz', repos = NULL, type = 'source')
 library(tidyEOF)
 library(tidyverse)
 library(scico)
-
 library(patchwork)
-```
 
-Import state data for plotting.
-```{r}
 bbox <- extent(c(-125, -102, 31, 49))
 
 state_names <- c('arizona', 'new mexico', 'colorado', 
@@ -26,7 +24,11 @@ state_names <- c('arizona', 'new mexico', 'colorado',
 states_wus <- maps::map('state', regions = state_names, 
                     fill = TRUE, plot = FALSE) %>% 
   st_as_sf()
+
+load('../tidyEOF/R/sysdata.rda')
 ```
+
+## Data import and preproceesing
 
 Write a function to preprocess the data.
 
@@ -47,13 +49,16 @@ preprocess <- function(x, var, bbox, flip = FALSE, regrid = FALSE, daily = FALSE
 ```
 
 
-Read in and preprocess the ensemble. The MRI-CGCM3 simulation is in two parts because its resolution is so high. Read it in first, combine the two layers, and use as a reference to resammple the other ensemble members.
+
+Read in and preprocess the ensemble. The MRI-CGCM3 simulation is in two parts because its resolution is so high. Read it in first, combine the two layers, and use as a reference to resample the other ensemble members.
 
 ```{r}
 mri <- c('data/snw_LImon_MRI-CGCM3_past1000_r1i1p1_085001-134912.nc',
   'data/snw_LImon_MRI-CGCM3_past1000_r1i1p1_135001-184912.nc') %>%
   map(preprocess, var = 'snw', bbox, flip = TRUE) %>%
   brick() %>%
+  resample(as(cera, 'Raster')) %>%
+  clamp(lower = 0) %>%
   mask(., all(near(., 0)), maskvalue = 1)
 
 rasts <- c('data/snw_LImon_MIROC-ESM_past1000_r1i1p1_085001-184912.nc',
@@ -61,30 +66,179 @@ rasts <- c('data/snw_LImon_MIROC-ESM_past1000_r1i1p1_085001-184912.nc',
   'data/snw_LImon_MPI-ESM-P_past1000_r1i1p1_085001-184912.nc',
   'data/snw_LImon_CCSM4_past1000_r1i1p1_085001-185012.nc') %>%
   map(preprocess, var = 'snw', bbox, flip = TRUE) %>%
-  map(resample, mri) %>%
+  map(resample,as(cera, 'Raster')) %>%
   map(clamp, lower = 0) %>% # the resampling procedure introduces negative values, this sets them to zero
-  map(~mask(., all(near(., 0)), maskvalue = 1)) %>% # mask cells that never experience snow
-  map(mask, mri[[1]])
+  map(~mask(., all(near(., 0)), maskvalue = 1)) #%>% # mask cells that never experience snow
+  #map(mask, mri[[1]])
 
 rasts[[5]] <- mri
 
-rasts %>% map(mean) %>% walk(plot)
+rast_list <- map(rasts, ~st_as_stars(.) %>%
+               .[,,,1:1000] %>% # hadcm3 and ccsm4 have one extra year
+  setNames('swe') %>%
+  st_set_dimensions('band', names = 'time', values = 850:1849))
+
+gcm_ensemble <- rast_list %>%
+    append(list(along = list(model = c('MIROC-ESM', 'HadCM3', 'MPI-ESM-P', 'CCSM4', 'MRI-CGCM3')))) %>%
+do.call(c, .) %>%
+  mutate(swe = units::set_units(swe, mm)) %>%
+  st_crop(st_as_sf(cera[,,,1]))
 ```
 
 
 ```{r}
-prep <- function(x) {
-  x %>%
-    as.data.frame(xy = TRUE, na.rm = TRUE, long = TRUE) %>%
-  mutate(year = round(parse_number(layer))) %>%
-  rename(SWE = value) %>%
-  dplyr::select(-layer)
-}
+ggplot() +
+  geom_stars(data = st_apply(gcm_ensemble, c('x', 'y', 'model'), mean)) +
+  facet_wrap(~model) +
+  scale_fill_distiller(na.value = NA) +
+  geom_sf(data = states_wus, fill = NA) +
+  theme_bw()
+```
 
-dat <- map(rasts, prep)
 
-patterns <- map(dat, get_patterns, k = 4)
+```{r}
+patterns <- map(1:5, ~get_patterns(slice(gcm_ensemble, 'model', .)), k = 4)
+map(patterns, plot_eofs)
 
+map(1:5, ~ ggplot() +
+  geom_stars(data = get_correlation(slice(gcm_ensemble, 'model', .), patterns[[.]])) +
+        geom_sf(data = states_wus, fill = NA, color = 'black') +
+  facet_wrap(~PC, nrow = 1) +
+scale_fill_scico(palette = 'broc', limits = c(-1, 1), name = 'Correlation', na.value = NA) +
+    labs(x = 'Longitude', y = 'Latitude') +
+  theme_void())
+
+```
+
+
+## Reconstruciton
+-- start here, make sure gcm ensembles same format and cells as cera
+```{r}
+recon_test1 <- predict_cca(get_patterns(filter(cera, time >= 1982), 10), 
+            get_patterns(filter(prism, time <= 2010), 9), 
+            slice(gcm_ensemble, 'model', 4)[,,,1:700],
+            k = 7)
+
+recon_test2 <- predict_cca(get_patterns(filter(cera, time >= 1982), 10), 
+            get_patterns(filter(prism, time <= 2010), 9), 
+            slice(gcm_ensemble, 'model', 4)[,,,701:1000],
+            k = 7)
+
+recon_test <- c(recon_test1, recon_test2)
+```
+
+```{r}
+plot(st_apply(recon_test, 1:2, mean));plot(st_apply(prism, 1:2, mean))
+plot(st_apply(recon_test, 1:2, sd));plot(st_apply(prism, 1:2, sd))
+```
+
+```{r}
+plot(gcm_ensemble[,,,1,4] %>% st_crop(st_as_sf(cera[,,,1])))
+plot(gcm_ensemble[,,,1,4])
+plot(cera[,,,1])
+plot(ccsm[,,,1])
+```
+
+
+## Lattice Krig
+```{r}
+resids <- prism_recon %>%
+  left_join(prism_dat, by = c('x', 'y', 'year'), suffix = c('_recon', '_obs')) %>%
+  group_by(x, y) %>%
+  mutate(error = SWE_recon - SWE_obs,
+           error_sd = error / sd(SWE_obs), # pearson residuals
+           error_sd2 = error / sd(error), # standardized (internally studentized)
+         snowy = median(SWE_obs) > 3)
+```
+
+```{r}
+out1$rho.MLE
+out2$rho.MLE
+sqrt(out1$rho.MLE.FULL)
+sqrt(out2$rho.MLE.FULL)
+```
+
+
+```{r}
+# these simulate with marginal unit variance, need to multiply by sill to recover original
+gSim <- LKrig.sim(st_coordinates(pts), out1$LKinfo, M = 6) * sqrt(out1$rho.MLE.FULL)
+
+gSim2 <- LKrig.sim(st_coordinates(pts), out2$LKinfo, M = 6) * sqrt(out2$rho.MLE.FULL)
+```
+
+```{r}
+resids %>%
+  group_by(x,y) %>%
+  summarise(swe_sd = sd(error)) %>%
+  bind_cols(as_tibble(gSim)) %>%
+  pivot_longer(V1:V6) %>%
+    ggplot(aes(x, y)) +
+  geom_raster(aes(fill = value * swe_sd)) +
+  facet_wrap(~name) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-300, 300)) +
+  coord_quickmap() +
+  theme_void()
+
+resids %>%
+  filter(year == 1982) %>%
+  bind_cols(as_tibble(gSim)) %>%
+  pivot_longer(V1:V6) %>%
+    ggplot(aes(x, y)) +
+  geom_raster(aes(fill = value)) +
+  facet_wrap(~name) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-3, 3)) +
+  coord_quickmap() +
+  theme_void()
+
+resids %>%
+  group_by(x,y) %>%
+  summarise(swe_sd = sd(error)) %>%
+  bind_cols(as_tibble(gSim2)) %>%
+  pivot_longer(V1:V6) %>%
+    ggplot(aes(x, y)) +
+  geom_raster(aes(fill = value * swe_sd)) +
+  facet_wrap(~name) +
+  scale_fill_distiller(palette = 'RdBu', limits = c(-300, 300)) +
+  coord_quickmap() +
+  theme_void()
+
+resids %>%
+  filter(year == 1982) %>%
+  bind_cols(as_tibble(gSim2)) %>%
+  pivot_longer(V1:V6) %>%
+    ggplot(aes(x, y)) +
+  geom_raster(aes(fill = value)) +
+  facet_wrap(~name) +
+  #scale_fill_distiller(palette = 'RdBu', limits = c(-3, 3)) +
+  coord_quickmap() +
+  theme_void()
+```
+
+```{r}
+pts <- resids %>%
+  filter(year == 1982) %>%
+  st_as_sf(coords = c('x','y'), crs = 4326)
+
+dat <- resids %>%
+  pivot_wider(id_cols = c(x,y), names_from = year, values_from = error_sd2)
+dat2 <- resids %>%
+  pivot_wider(id_cols = c(x,y), names_from = year, values_from = error)
+```
+
+interesting, lattice kriging the standardized and unstandardized doesn't seem to make a difference. 
+```{r}
+out1<- LatticeKrig(st_coordinates(pts), dat[,3:38])
+out2<- LatticeKrig(st_coordinates(pts), dat2[,3:38])
+```
+
+```{r}
+out1
+out2
+```
+## other stuff
+
+
+```{r}
 get_corrs2 <- function(dat, patterns) { # should be able to take arbitrary number of amps rather than first 4
   amps <- patterns$amplitudes %>%
     spread(PC, amplitude, sep ='')
