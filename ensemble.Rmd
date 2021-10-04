@@ -13,6 +13,7 @@ library(tidyEOF)
 library(tidyverse)
 library(scico)
 library(patchwork)
+library(LatticeKrig)
 
 bbox <- extent(c(-125, -102, 31, 49))
 
@@ -85,6 +86,10 @@ do.call(c, .) %>%
   st_crop(st_as_sf(cera[,,,1]))
 ```
 
+```{r}
+saveRDS(gcm_ensemble, 'gcm_ensemble.rds')
+```
+
 
 ```{r}
 ggplot() +
@@ -125,6 +130,9 @@ recon_test2 <- predict_cca(get_patterns(filter(cera, time >= 1982), 10),
             k = 7)
 
 recon_test <- c(recon_test1, recon_test2)
+
+rm(recon_test1, recon_test2)
+gc()
 ```
 
 ```{r}
@@ -132,23 +140,86 @@ plot(st_apply(recon_test, 1:2, mean));plot(st_apply(prism, 1:2, mean))
 plot(st_apply(recon_test, 1:2, sd));plot(st_apply(prism, 1:2, sd))
 ```
 
+
+## Lattice Krig
+
 ```{r}
-plot(gcm_ensemble[,,,1,4] %>% st_crop(st_as_sf(cera[,,,1])))
-plot(gcm_ensemble[,,,1,4])
-plot(cera[,,,1])
-plot(ccsm[,,,1])
+n_modes <- 7 # is this the right number?
+prism_patterns <- get_patterns(filter(prism, time <= 2010), k = n_modes)
+prism_recon <- reconstruct_field(prism_patterns)
+prism_recon2 <- predict_cca(get_patterns(filter(cera, time >= 1982), 10), 
+            get_patterns(filter(prism, time <= 2010), 9), 
+            filter(cera, time >= 1982),
+            k = 7)
+```
+
+```{r}
+resids <- (prism_recon - filter(prism, time <= 2010)) %>%
+  setNames('error')
+
+resids2 <- (prism_recon2 - filter(prism, time <= 2010)) %>%
+  setNames('error')
+
+  mutate(error_pearson = error / st_apply(filter(prism, time <= 2010), 1:2, sd), # pearson residuals
+        error_stand = error / sd(error)) # standardized (internally studentized)
+```
+
+```{r}
+plot(st_apply(resids, 1:2, sd));plot(st_apply(resids2, 1:2, sd))
+```
+
+```{r}
+error_sd <- st_apply(resids2, 1:2, sd)
+slice(prism, 'time', 1)
+st_apply(resids, 1:2, sd)
+prism_patterns$eofs
+prism
+
+plot(resids / error_sd) 
 ```
 
 
-## Lattice Krig
 ```{r}
-resids <- prism_recon %>%
-  left_join(prism_dat, by = c('x', 'y', 'year'), suffix = c('_recon', '_obs')) %>%
-  group_by(x, y) %>%
-  mutate(error = SWE_recon - SWE_obs,
-           error_sd = error / sd(SWE_obs), # pearson residuals
-           error_sd2 = error / sd(error), # standardized (internally studentized)
-         snowy = median(SWE_obs) > 3)
+ggplot() + geom_stars(data = resids) + facet_wrap(~time) + geom_sf(data = states_wus, fill = NA) + scale_fill_distiller(palette = 'RdBu', na.value = NA, limits = c(-712, 712))
+```
+
+```{r}
+# i think this causes some divide by zeroes?
+pts <- (resids2 / error_sd) %>%
+  slice('time', 1) %>%
+  st_as_sf(as_points = TRUE) %>%
+  remove_missing() %>%
+  st_coordinates()
+
+dat <- (resids2 / error_sd) %>%
+  as_tibble() %>% 
+  remove_missing() %>%
+  pivot_wider(id_cols = c(x,y), names_from = time, values_from = error) %>%
+  select(-x, -y) %>%
+  units::drop_units()
+
+pts2 <- resids2 %>%
+  slice('time', 1) %>%
+  st_as_sf(as_points = TRUE) %>%
+  remove_missing() %>%
+  st_coordinates()
+dat2 <- resids2 %>%
+  as_tibble() %>% 
+  remove_missing() %>%
+  pivot_wider(id_cols = c(x,y), names_from = time, values_from = error) %>%
+  select(-x, -y) %>%
+  units::drop_units()
+```
+
+interesting, lattice kriging the standardized and unstandardized doesn't seem to make a difference. 
+```{r}
+out1<- LatticeKrig(pts, dat)
+out2<- LatticeKrig(pts2, dat2)
+```
+
+```{r}
+out1
+out2
 ```
 
 ```{r}
@@ -161,80 +232,116 @@ sqrt(out2$rho.MLE.FULL)
 
 ```{r}
 # these simulate with marginal unit variance, need to multiply by sill to recover original
-gSim <- LKrig.sim(st_coordinates(pts), out1$LKinfo, M = 6) * sqrt(out1$rho.MLE.FULL)
+reps <- 16
+gSim <- LKrig.sim(pts, out1$LKinfo, M = reps) %>% 
+  `colnames<-`(1:reps) %>%
+  cbind(pts, .) %>% 
+  as_tibble() %>% 
+  rename(x = X, y = Y) %>%
+  pivot_longer(-c(x,y), names_to = 'rep', values_to = 'error') %>% 
+  st_as_stars(dims = 1:3) %>% 
+  st_set_crs(4326) # * sqrt(out1$rho.MLE.FULL)
 
-gSim2 <- LKrig.sim(st_coordinates(pts), out2$LKinfo, M = 6) * sqrt(out2$rho.MLE.FULL)
+gSim2 <- LKrig.sim(pts2, out2$LKinfo, M = reps) %>% 
+  `colnames<-`(1:reps) %>%
+  cbind(pts2, .) %>% 
+  as_tibble() %>% 
+  rename(x = X, y = Y) %>%
+  pivot_longer(-c(x,y), names_to = 'rep', values_to = 'error') %>% 
+  st_as_stars(dims = 1:3) %>% 
+  st_set_crs(4326) # * sqrt(out2$rho.MLE.FULL)
 ```
 
 ```{r}
-resids %>%
-  group_by(x,y) %>%
-  summarise(swe_sd = sd(error)) %>%
-  bind_cols(as_tibble(gSim)) %>%
-  pivot_longer(V1:V6) %>%
-    ggplot(aes(x, y)) +
-  geom_raster(aes(fill = value * swe_sd)) +
-  facet_wrap(~name) +
-  scale_fill_distiller(palette = 'RdBu', limits = c(-300, 300)) +
-  coord_quickmap() +
-  theme_void()
+st_apply(gSim, 1:2, sd) %>% plot
+st_apply(gSim2, 1:2, sd) %>% plot
 
-resids %>%
-  filter(year == 1982) %>%
-  bind_cols(as_tibble(gSim)) %>%
-  pivot_longer(V1:V6) %>%
-    ggplot(aes(x, y)) +
-  geom_raster(aes(fill = value)) +
-  facet_wrap(~name) +
-  scale_fill_distiller(palette = 'RdBu', limits = c(-3, 3)) +
-  coord_quickmap() +
-  theme_void()
+```
 
-resids %>%
-  group_by(x,y) %>%
-  summarise(swe_sd = sd(error)) %>%
-  bind_cols(as_tibble(gSim2)) %>%
-  pivot_longer(V1:V6) %>%
-    ggplot(aes(x, y)) +
-  geom_raster(aes(fill = value * swe_sd)) +
-  facet_wrap(~name) +
-  scale_fill_distiller(palette = 'RdBu', limits = c(-300, 300)) +
-  coord_quickmap() +
-  theme_void()
 
-resids %>%
-  filter(year == 1982) %>%
-  bind_cols(as_tibble(gSim2)) %>%
-  pivot_longer(V1:V6) %>%
-    ggplot(aes(x, y)) +
-  geom_raster(aes(fill = value)) +
-  facet_wrap(~name) +
-  #scale_fill_distiller(palette = 'RdBu', limits = c(-3, 3)) +
+```{r}
+ggplot() +
+  geom_stars(data = gSim) +
+  facet_wrap(~rep) +
+  scale_fill_viridis_c(na.value = NA) +
   coord_quickmap() +
-  theme_void()
+  theme_bw()
+ggplot() +
+  geom_stars(data = gSim2) +
+  facet_wrap(~rep) +
+  scale_fill_viridis_c(na.value = NA) +
+  coord_quickmap() +
+  theme_bw()
+
+ggplot() +
+  geom_stars(data = gSim * error_sd) +
+  facet_wrap(~rep) +
+  scale_fill_viridis_c(na.value = NA) +
+  coord_quickmap() +
+  theme_bw()
+ggplot() +
+  geom_stars(data = gSim2 * error_sd) +
+  facet_wrap(~rep) +
+  scale_fill_viridis_c(na.value = NA) +
+  coord_quickmap() +
+  theme_bw()
 ```
 
 ```{r}
-pts <- resids %>%
-  filter(year == 1982) %>%
-  st_as_sf(coords = c('x','y'), crs = 4326)
+ggplot() +
+  geom_stars(data = resids2[,,,1:16]) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(na.value = NA) +
+  coord_quickmap() +
+  theme_bw()
 
-dat <- resids %>%
-  pivot_wider(id_cols = c(x,y), names_from = year, values_from = error_sd2)
-dat2 <- resids %>%
-  pivot_wider(id_cols = c(x,y), names_from = year, values_from = error)
+ggplot() +
+  geom_stars(data = (resids2 / error_sd)[,,,1:16]) +
+  facet_wrap(~time) +
+  scale_fill_viridis_c(na.value = NA) +
+  coord_quickmap() +
+  theme_bw()
 ```
 
-interesting, lattice kriging the standardized and unstandardized doesn't seem to make a difference. 
 ```{r}
-out1<- LatticeKrig(st_coordinates(pts), dat[,3:38])
-out2<- LatticeKrig(st_coordinates(pts), dat2[,3:38])
+times <- st_get_dimension_values(recon_test, 'time')
+
+ 
+ccsm_ensemble <- map(1:15, ~LKrig.sim(pts2, out2$LKinfo, M = 1000) %>% 
+  `colnames<-`(times) %>%
+  cbind(pts2, .) %>% 
+  as_tibble() %>% 
+  rename(x = X, y = Y) %>%
+  pivot_longer(-c(x,y), names_to = 'time', values_to = 'error', names_transform = list(time = as.integer)) %>% 
+  st_as_stars(dims = 1:3) %>% 
+  st_set_crs(4326) %>%
+   `*`(error_sd) %>%
+   `+`(units::drop_units(recon_test))) %>% 
+  append(list(along = 'ensemble')) %>%
+  do.call(c, .) %>%
+    setNames('swe')# %>%
+    mutate(swe = if_else(swe > 0, swe, 0))
 ```
 
 ```{r}
-out1
-out2
+new_test <- ccsm_ensemble
 ```
+
+
+## a final recon
+
+```{r}
+sim <- LKrig.sim(pts2, out2$LKinfo, M = reps) %>% 
+  `colnames<-`(1:reps) %>%
+  cbind(pts2, .) %>% 
+  as_tibble() %>% 
+  rename(x = X, y = Y) %>%
+  pivot_longer(-c(x,y), names_to = 'rep', values_to = 'error') %>% 
+  st_as_stars(dims = 1:3) %>% 
+  st_set_crs(4326) 
+```
+
+
 ## other stuff
 
 
